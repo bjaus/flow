@@ -139,6 +139,9 @@ plus the operator's decision. A completed sibling branch's output survives a sus
 runtime supplies a `CheckpointStore` at compile time and resumes a run by re-invoking with the same checkpoint
 id and the decision data. Every custom type that rides a checkpoint is auto-registered by the DSL (the
 workflow's input/output types, and the type each `Human` step carries), so authors need no manual registration.
+This durability is the engine's own: per-step checkpoints land at engine node boundaries and on-boot recovery
+resumes them from the `RunStore`. flow deliberately does **not** layer a separate durable-execution framework
+(such as DBOS) on top — that would duplicate the checkpoint mechanism the engine already provides.
 
 **What remains on the `flow` side: world-class API documentation.** The library is the public face of the
 product and must be documented so that both humans and coding agents can use it without reading its internals:
@@ -288,6 +291,21 @@ type Provider interface {
 type AgentRegistry interface {
     Persona(name string) (Persona, bool)
 }
+
+// Tracer observes execution for external observability, receiving a span per run, per step, and per agent
+// call (model, token counts, prompt/response, latency). Default: a no-op (zero overhead). flow ships an
+// OpenTelemetry implementation (GenAI/OpenInference semantic conventions) whose OTLP exporter is set by
+// config — point it at Arize Phoenix, Langfuse, Jaeger, or any OTLP backend (§6.5). Implement Tracer
+// directly for any other sink.
+type Tracer interface {
+    StartRun(ctx context.Context, r *Run) (context.Context, Span)
+    StartStep(ctx context.Context, runID, label, kind string) (context.Context, Span)
+    StartAgent(ctx context.Context, runID, persona string) (context.Context, Span)
+}
+type Span interface {
+    Set(attrs ...Attr) // GenAI/OpenInference attributes (model, tokens, tool calls, …)
+    End(err error)
+}
 ```
 
 The runtime composes an `AgentRegistry` and a `Provider` into the `engine.Registry` a compiled workflow needs:
@@ -303,6 +321,14 @@ implementing the same interfaces — this is the path from a laptop to a cluster
 **Secrets.** The runtime reads credentials (the gateway key, any store DSN password) from environment variables
 only; it never accepts them inline in code or config files, never logs them, and the repository's `.env` is
 git-ignored.
+
+**Principle: preserve every seam the engine exposes.** flow's job is to delete boilerplate, not to foreclose
+choices. Wherever cloudwego/eino leaves a decision open — the chat model, tools, callbacks and tracing, the
+checkpoint store, serialization — flow surfaces it as a port with a sensible local default, never a hardcoded
+one. A default is a convenience, not a constraint: a user can always supply their own implementation, or drop
+down to the underlying eino seam directly. flow removes the paperwork of using eino without removing any of its
+flexibility; that is the whole value proposition, and it applies to observability (the `Tracer`) exactly as it
+does to every other port.
 
 ---
 
@@ -374,6 +400,32 @@ Each event has a monotonic per-run sequence number so a late subscriber replays 
 follows live without gaps. The same event model feeds both presentation layers: the `/api` SSE stream carries
 events as JSON; the web app's SSE stream (§10) carries the same events rendered as HTML fragments for htmx to
 swap into the page.
+
+### 6.5 Observability (OpenTelemetry)
+
+The `EventSink` (§6.4) is flow's *internal* stream that drives the clients live. **Observability** is the
+separate, *external* story — tracing, evaluation, and cost analysis in a dedicated backend — and it goes
+through the `Tracer` port (§5), which defaults to a no-op so nothing is assumed and there is zero overhead
+until a user opts in.
+
+flow instruments each run as an **OpenTelemetry span tree** — a span per run, per step, and per agent LLM call
+— using the **GenAI / OpenInference semantic conventions** (model, token counts, prompt/response, tool calls,
+latency), so LLM-aware backends render agent traces without custom mapping. Both the span tree and the
+`EventSink` derive from the same engine callbacks (the ones that also feed token streaming), so it is one
+instrumentation layer fanning out to two consumers.
+
+flow ships one `Tracer` implementation — an OpenTelemetry exporter configured by environment (OTLP endpoint +
+headers) — and the user chooses the destination:
+
+- **Arize Phoenix** — self-hostable, OTLP-native, OpenInference conventions; runs locally, ideal for the
+  local-first default. Point the exporter at its `/v1/traces` endpoint.
+- **Langfuse** — self-host or cloud; an OTLP ingestion endpoint plus prompt/eval/cost features. Same exporter,
+  its endpoint and auth headers.
+- **Any other OTLP backend** — Jaeger, Grafana Tempo, Honeycomb, a collector — works with the same exporter.
+
+No backend is required, none is bundled, and a user who wants something other than OpenTelemetry implements the
+`Tracer` port directly. This is the pluggability principle of §5 applied to observability: rich insight when
+you want it, nothing forced when you don't.
 
 ---
 
@@ -787,7 +839,8 @@ zero tokens.
 - **Build.**
   - In `app`: the `Run` struct (id, workflow, fingerprint, status, input, result, error, timestamps), the run
     `status` constants (§6.1), `Event` and its kinds (§6.4), `RunFilter`, `Persona`, and the port interfaces
-    `CheckpointStore`, `RunStore`, `EventSink`, `Provider`, `AgentRegistry` (§5).
+    `CheckpointStore`, `RunStore`, `EventSink`, `Provider`, `AgentRegistry`, and `Tracer`/`Span` (§5), the last
+    with a **no-op default** so nothing is emitted until a real tracer is configured.
   - `app/store`: SQLite implementations of all three stores in one database — single connection,
     `MaxOpenConns(1)`, WAL, embedded schema migrations. `RunStore.Claim` dequeues FIFO the next `queued`/
     resumable run atomically. The `EventSink` is in-process pub/sub with a SQLite event log for history replay.
@@ -806,7 +859,8 @@ zero tokens.
     `Register`, and `Serve(ctx)`; default any nil port to its local implementation.
   - The queue worker: claim a run → build its `engine.Registry` (Phase 4 supplies the real one; use the fake
     provider now) → `engine.Compile` with the checkpoint store → drive `Invoke`/`Stream`, translating engine
-    callbacks into `EventSink` events (`run.*`, `step.*`, `agent.token`) → persist result and terminal status.
+    callbacks into both `EventSink` events (`run.*`, `step.*`, `agent.token`) and `Tracer` spans (run → step →
+    agent, with GenAI attributes) from the one callback pass → persist result and terminal status.
   - Run lifecycle transitions (§6.1), including a human gate suspending to `awaiting_review`, and a submitted
     decision returning the run to `queued` and resuming it from the checkpoint via the engine's resume path.
   - On-boot resume: on `Serve`, scan the store for `running`/`parked` runs and re-enqueue the resumable ones.
@@ -835,9 +889,10 @@ zero tokens.
   run to completion, and `--json` output parses.
 - **Verify.** `just test ./app/server/...`; `flowd runs list --json` against `just dev`.
 
-### Phase 4 — The agent/skill registry and the real provider
+### Phase 4 — The agent/skill registry, the real provider, and the OpenTelemetry tracer
 
-- **Goal.** Markdown personas/skills resolved into an `engine.Registry`, plus the real model gateway.
+- **Goal.** Markdown personas/skills resolved into an `engine.Registry`, the real model gateway, and the
+  external-observability integration.
 - **Build.**
   - `app/agent`: a loader for `./agents` (persona frontmatter `name`/`model`/`tools`/`skills` + system-
     instruction body) and `./skills` (`SKILL.md`), with configurable directories defaulting to `./agents` and
@@ -845,13 +900,18 @@ zero tokens.
   - `app/provider`: the OpenAI-compatible gateway provider building an `engine.ChatModel` bound to
     `FLOW_GATEWAY_URL` and the key from the environment, with the persona's tools attached; structured-output
     decoding with retry-on-invalid.
+  - `app/observe`: the OpenTelemetry `Tracer` implementation (§6.5) — a run/step/agent span tree with
+    GenAI/OpenInference attributes and an OTLP exporter configured from the environment. Verify against a local
+    **Arize Phoenix** and confirm **Langfuse** works by pointing the same exporter at its OTLP endpoint.
   - Compose `AgentRegistry` + `Provider` into the `engine.Registry` the worker passes to `engine.Compile`; ship
     a small set of default persona/skill files.
 - **Done when.** The loader parses sample personas/skills; editing a persona file changes behavior on the next
   invocation (tested via an injected watch event); the gateway provider builds a working model in an
   integration test that is **skipped when `FLOW_GATEWAY_URL` is unset**; malformed structured output triggers a
-  retry.
-- **Verify.** `just test ./app/agent/...`; with a gateway running, `just gateway` then a manual smoke run.
+  retry; with an OTLP endpoint set, a run produces a run→step→agent span tree in the collector (and the no-op
+  default emits nothing).
+- **Verify.** `just test ./app/agent/...`; with a gateway running, `just gateway` then a manual smoke run; a
+  run against a local Phoenix shows the trace.
 
 ### Phase 5 — The terminal UI
 
