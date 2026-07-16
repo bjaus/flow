@@ -83,7 +83,7 @@ func (h *Handler) trigger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
 }
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	runs, err := h.service.ListRuns(r.Context(), core.RunFilter{Workflow: r.URL.Query().Get("workflow"), Status: core.Status(r.URL.Query().Get("status"))})
+	runs, err := h.service.ListRuns(r.Context(), core.RunFilter{Workflow: r.URL.Query().Get("workflow"), Status: core.Status(r.URL.Query().Get("status")), ParentID: r.URL.Query().Get("parent")})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

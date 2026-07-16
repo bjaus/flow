@@ -111,6 +111,10 @@ zero-token tests. `app.Gateway` targets an OpenAI-compatible endpoint from `FLOW
 `Config.Triggers` schedules cron-driven runs: each `app.Trigger` pairs a registered workflow with a standard
 5-field cron spec and a canned JSON input; scheduled runs carry the trigger's name, and a firing is skipped
 (with a `trigger.skipped` event) while the daemon drains or the previous scheduled run is still active.
+Workflows compose across runs too: inside a `Do` step, `app.SpawnAwait(ctx, workflow, input)` (or the
+`app.Spawner` from `app.SpawnerFrom(ctx)`) spawns a child run of another registered workflow and awaits its
+result; children record their parent (`parent_id` in the run JSON, `runs list --parent`), canceling a parent
+cancels its children, and spawn depth is capped to stop runaway recursion.
 
 ## Development
 

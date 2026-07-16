@@ -381,7 +381,7 @@ commands and queries; Server-Sent Events for the live stream.
 |---|---|
 | `GET /api/workflows` | list registered workflows (name, description, input/output types) |
 | `POST /api/runs` | trigger a run: `{workflow, input}` → `{id}` |
-| `GET /api/runs` | list runs, filterable by workflow and status |
+| `GET /api/runs` | list runs, filterable by workflow, status, and parent run (`?parent=`) |
 | `GET /api/runs/{id}` | fetch one run (status, input, result/error, timing) |
 | `GET /api/runs/{id}/events` | **SSE** stream of that run's events (replays history, then live) |
 | `GET /api/events` | **SSE** stream of all runs' events |
@@ -445,6 +445,30 @@ the daemon enqueues a run through the same path as `POST /api/runs`, stamping th
 with the reason — while the daemon is draining or while the trigger's previous run is still `queued`,
 `running`, or `awaiting_review`, so a slow workflow never piles up behind its own schedule. The scheduler
 stops with the worker on shutdown.
+
+### 6.7 Child runs (workflow-calls-workflow)
+
+A running workflow can spawn runs of other registered workflows and await their results, so composite
+pipelines (a planning workflow spawning one implementation run per issue) are first-class. Workflows are
+compiled Go that never sees the `App`, so the worker injects an `app.Spawner` into every run's context;
+inside a `Do` step it is recovered with `app.SpawnerFrom(ctx)`:
+
+- `Spawn(ctx, workflow, input)` marshals the input, validates it against the target workflow's input type,
+  and enqueues a child run stamped with the calling run's id (`Run.ParentID`), through the same path as
+  `POST /api/runs`. A spawn deeper than `app.MaxSpawnDepth` (8) ancestors is rejected, so accidental
+  infinite recursion errors instead of looping.
+- `Await(ctx, runID)` blocks until the child is terminal, returning its result; a failed or canceled child
+  surfaces as an error. `app.SpawnAwait(ctx, workflow, input)` does both in one call.
+
+Await never deadlocks the single worker (§6.2): the parent occupies the worker while a queued child would
+otherwise wait forever, so Await claims the queued child directly and executes it **inline in the parent's
+worker slot** (re-entrant execute). The tradeoff — stated in the `Await` doc comment — is that the parent
+stays `running` while the child runs or waits at a human gate, and the inline chain is not independently
+resumable across a restart; the seam is left for a future park-the-parent scheme without changing the API.
+
+`Run.ParentID` is persisted, exposed as `parent_id` in the run JSON, and filterable (`GET /api/runs?parent=`,
+`runs list --parent`), so clients can render run families. Canceling a parent cancels its non-terminal
+descendants.
 
 ---
 

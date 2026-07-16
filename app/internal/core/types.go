@@ -31,6 +31,7 @@ type Run struct {
 	Fingerprint   string          `json:"fingerprint"`
 	Status        Status          `json:"status"`
 	Trigger       string          `json:"trigger,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
 	Input         json.RawMessage `json:"input"`
 	Result        json.RawMessage `json:"result,omitempty"`
 	Error         string          `json:"error,omitempty"`
@@ -60,6 +61,7 @@ type ConfigStatus struct {
 type RunFilter struct {
 	Workflow string
 	Status   Status
+	ParentID string
 }
 
 type EventKind string

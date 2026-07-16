@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS runs (
   fingerprint TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
   trigger_name TEXT NOT NULL DEFAULT '',
+  parent_id TEXT NOT NULL DEFAULT '',
   input BLOB NOT NULL,
   result BLOB,
   error TEXT NOT NULL DEFAULT '',

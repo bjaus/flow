@@ -60,8 +60,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN trigger_name TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
-		return fmt.Errorf("migrate sqlite: %w", err)
+	for _, alter := range []string{
+		`ALTER TABLE runs ADD COLUMN trigger_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.ExecContext(ctx, alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate sqlite: %w", err)
+		}
 	}
 	return nil
 }
@@ -118,23 +123,23 @@ func (s *SQLiteStore) Save(ctx context.Context, r *core.Run) error {
 	if r.Decision != nil {
 		decision, _ = json.Marshal(r.Decision)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,workflow,fingerprint,status,trigger_name,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workflow=excluded.workflow,fingerprint=excluded.fingerprint,status=excluded.status,trigger_name=excluded.trigger_name,input=excluded.input,result=excluded.result,error=excluded.error,interrupt_id=excluded.interrupt_id,gate_prompt=excluded.gate_prompt,decision=excluded.decision,cancel_pending=excluded.cancel_pending,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`,
-		r.ID, r.Workflow, r.Fingerprint, r.Status, r.Trigger, []byte(r.Input), []byte(r.Result), r.Error, r.InterruptID, r.GatePrompt, decision, r.CancelPending, r.CreatedAt, r.StartedAt, r.FinishedAt, r.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,workflow,fingerprint,status,trigger_name,parent_id,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workflow=excluded.workflow,fingerprint=excluded.fingerprint,status=excluded.status,trigger_name=excluded.trigger_name,parent_id=excluded.parent_id,input=excluded.input,result=excluded.result,error=excluded.error,interrupt_id=excluded.interrupt_id,gate_prompt=excluded.gate_prompt,decision=excluded.decision,cancel_pending=excluded.cancel_pending,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`,
+		r.ID, r.Workflow, r.Fingerprint, r.Status, r.Trigger, r.ParentID, []byte(r.Input), []byte(r.Result), r.Error, r.InterruptID, r.GatePrompt, decision, r.CancelPending, r.CreatedAt, r.StartedAt, r.FinishedAt, r.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("save run: %w", err)
 	}
 	return nil
 }
 
-const runColumns = `id,workflow,fingerprint,status,trigger_name,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at`
+const runColumns = `id,workflow,fingerprint,status,trigger_name,parent_id,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at`
 
 type scanner interface{ Scan(...any) error }
 
 func scanRun(row scanner) (*core.Run, error) {
 	r := &core.Run{}
 	var input, result, decision []byte
-	if err := row.Scan(&r.ID, &r.Workflow, &r.Fingerprint, &r.Status, &r.Trigger, &input, &result, &r.Error, &r.InterruptID, &r.GatePrompt, &decision, &r.CancelPending, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.UpdatedAt); err != nil {
+	if err := row.Scan(&r.ID, &r.Workflow, &r.Fingerprint, &r.Status, &r.Trigger, &r.ParentID, &input, &result, &r.Error, &r.InterruptID, &r.GatePrompt, &decision, &r.CancelPending, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
 	r.Input, r.Result = append([]byte(nil), input...), append([]byte(nil), result...)
@@ -177,6 +182,10 @@ func (r *Runs) List(ctx context.Context, f core.RunFilter) ([]*core.Run, error) 
 		q += ` AND status=?`
 		args = append(args, f.Status)
 	}
+	if f.ParentID != "" {
+		q += ` AND parent_id=?`
+		args = append(args, f.ParentID)
+	}
 	q += ` ORDER BY created_at,id`
 	rows, err := r.s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -198,12 +207,22 @@ func (r *Runs) List(ctx context.Context, f core.RunFilter) ([]*core.Run, error) 
 }
 
 func (r *Runs) Claim(ctx context.Context) (*core.Run, error) {
+	return r.claim(ctx, `SELECT `+runColumns+` FROM runs WHERE status=? ORDER BY created_at,id LIMIT 1`, core.StatusQueued)
+}
+
+// ClaimByID claims one specific queued run, returning nil when it is not
+// queued. It lets a parent run drive a spawned child inline (app.Spawner).
+func (r *Runs) ClaimByID(ctx context.Context, id string) (*core.Run, error) {
+	return r.claim(ctx, `SELECT `+runColumns+` FROM runs WHERE id=? AND status=?`, id, core.StatusQueued)
+}
+
+func (r *Runs) claim(ctx context.Context, query string, args ...any) (*core.Run, error) {
 	tx, err := r.s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("claim begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	run, err := scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE status=? ORDER BY created_at,id LIMIT 1`, core.StatusQueued))
+	run, err := scanRun(tx.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

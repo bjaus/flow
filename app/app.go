@@ -353,10 +353,10 @@ func typeName(t reflect.Type) string {
 }
 
 func (a *App) Trigger(ctx context.Context, workflow string, input json.RawMessage) (string, error) {
-	return a.enqueue(ctx, workflow, input, "")
+	return a.enqueue(ctx, workflow, input, "", "")
 }
 
-func (a *App) enqueue(ctx context.Context, workflow string, input json.RawMessage, trigger string) (string, error) {
+func (a *App) enqueue(ctx context.Context, workflow string, input json.RawMessage, trigger, parentID string) (string, error) {
 	if a.cfg.DrainOnly {
 		return "", errors.New("daemon is in drain-only mode")
 	}
@@ -373,7 +373,7 @@ func (a *App) enqueue(ctx context.Context, workflow string, input json.RawMessag
 		return "", fmt.Errorf("decode input: %w", err)
 	}
 	now := time.Now().UTC()
-	r := &Run{ID: uuid.NewString(), Workflow: workflow, Fingerprint: wf.info.Fingerprint, Status: StatusQueued, Trigger: trigger, Input: append([]byte(nil), input...), CreatedAt: now, UpdatedAt: now}
+	r := &Run{ID: uuid.NewString(), Workflow: workflow, Fingerprint: wf.info.Fingerprint, Status: StatusQueued, Trigger: trigger, ParentID: parentID, Input: append([]byte(nil), input...), CreatedAt: now, UpdatedAt: now}
 	if err := a.runs.Save(ctx, r); err != nil {
 		return "", err
 	}
@@ -460,7 +460,12 @@ func (a *App) Cancel(ctx context.Context, id string) error {
 	} else {
 		r.CancelPending = true
 	}
-	return a.runs.Save(ctx, r)
+	if err := a.runs.Save(ctx, r); err != nil {
+		return err
+	}
+	// Canceling a parent cancels its children: descend before the parent's
+	// own cancel completes so queued children never get claimed afterwards.
+	return a.cancelChildren(ctx, r.ID)
 }
 
 func (a *App) signal() {
@@ -667,6 +672,8 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 	// Namespace nested sub-run checkpoints (fan-out branches, bind/dispatch participants) under this run's
 	// id, so two runs of the same workflow suspended at the same gate never share a sub-checkpoint.
 	runCtx = engine.WithCheckpointScope(runCtx, run.ID)
+	// Let steps spawn and await child runs of other registered workflows (spawn.go).
+	runCtx = a.withSpawner(runCtx, run)
 	if run.Decision != nil && run.InterruptID != "" {
 		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, flow.Decision{Approved: run.Decision.Approved, Feedback: run.Decision.Feedback})
 		run.Decision = nil
@@ -730,6 +737,8 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 			if saveErr := a.runs.Save(context.Background(), latest); saveErr != nil {
 				return saveErr
 			}
+			// The parent reached terminal via cancel: take down any children still in flight.
+			_ = a.cancelChildren(context.Background(), run.ID)
 			a.events.Publish(Event{RunID: run.ID, Kind: EventRunFinished, Data: mustJSON(map[string]any{"status": StatusCanceled})})
 			return nil
 		}

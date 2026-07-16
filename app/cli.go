@@ -145,10 +145,10 @@ func readInput(s string) ([]byte, error) {
 	return []byte(s), nil
 }
 func runList(endpoint *string) *cobra.Command {
-	var status, workflow string
+	var status, workflow, parent string
 	var jsonOut bool
 	c := &cobra.Command{Use: "list", RunE: func(cmd *cobra.Command, _ []string) error {
-		path := "/api/runs?status=" + status + "&workflow=" + workflow
+		path := "/api/runs?status=" + status + "&workflow=" + workflow + "&parent=" + parent
 		var out []*Run
 		if err := client(endpoint).request(cmd.Context(), "GET", path, nil, &out); err != nil {
 			return err
@@ -165,6 +165,7 @@ func runList(endpoint *string) *cobra.Command {
 	}}
 	c.Flags().StringVar(&status, "status", "", "filter status")
 	c.Flags().StringVar(&workflow, "workflow", "", "filter workflow")
+	c.Flags().StringVar(&parent, "parent", "", "filter children of a parent run id")
 	c.Flags().BoolVar(&jsonOut, "json", false, "print JSON")
 	return c
 }

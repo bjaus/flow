@@ -119,7 +119,7 @@ func (a *App) fire(ctx context.Context, t Trigger) {
 		skip("previous run is still active")
 		return
 	}
-	if _, err := a.enqueue(ctx, t.Workflow, t.Input, t.Name); err != nil {
+	if _, err := a.enqueue(ctx, t.Workflow, t.Input, t.Name, ""); err != nil {
 		skip("enqueue failed: " + err.Error())
 	}
 }
