@@ -105,6 +105,10 @@ Configure `app.Config.Tools` to replace or extend executable tools. A textual gr
 tool implementation cannot execute. Root tools at the actual workspace; never expose a broader directory just
 to avoid defining a proper port.
 
+MCP servers configured through `app.Config.MCPServers` contribute discovered tools under names such as
+`mcp__github__search_repositories`. They remain deny-by-default: grant the generated name exactly as for any
+other tool. See [the runtime MCP guide](RUNTIME.md#mcp-tools) for connection configuration and trust boundaries.
+
 ## Model fallbacks and contracts
 
 The gateway walks `Model` then `FallbackModels` on provider failure. Output is decoded into the `Agent`'s Go

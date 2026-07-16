@@ -19,6 +19,7 @@ import (
 
 	"github.com/bjaus/flow"
 	"github.com/bjaus/flow/app/agent"
+	flowmcp "github.com/bjaus/flow/app/mcp"
 	"github.com/bjaus/flow/app/server"
 	"github.com/bjaus/flow/app/tools"
 	"github.com/bjaus/flow/app/tui"
@@ -61,6 +62,9 @@ type Config struct {
 	// When nil, New defaults it to tools.Default("."), the built-in bash and
 	// file tools confined to the current working directory.
 	Tools map[string]tool.BaseTool
+	// MCPServers are connected and discovered when New runs. Their tools are
+	// added to Tools as mcp__<server>__<tool> and closed when Serve returns.
+	MCPServers []flowmcp.Server
 }
 
 type WorkflowInfo struct {
@@ -94,6 +98,7 @@ type App struct {
 	registry   AgentRegistry
 	tracer     Tracer
 	ownedStore *Stores
+	mcpClient  *flowmcp.Client
 	schedules  []schedule
 	clock      func() time.Time
 	timer      func(time.Duration) <-chan time.Time
@@ -142,6 +147,26 @@ func New(cfg Config) (*App, error) {
 	if cfg.Tools == nil {
 		cfg.Tools = tools.Default(".")
 	}
+	var mcpClient *flowmcp.Client
+	if len(cfg.MCPServers) > 0 {
+		mcpClient, err = flowmcp.Connect(context.Background(), cfg.MCPServers...)
+		if err != nil {
+			if owned {
+				_ = cfg.Store.Close()
+			}
+			return nil, fmt.Errorf("MCP servers: %w", err)
+		}
+		for name, executable := range mcpClient.Tools() {
+			if _, exists := cfg.Tools[name]; exists {
+				_ = mcpClient.Close()
+				if owned {
+					_ = cfg.Store.Close()
+				}
+				return nil, fmt.Errorf("MCP tool %q conflicts with a configured tool", name)
+			}
+			cfg.Tools[name] = executable
+		}
+	}
 	if cfg.Listen == "" {
 		cfg.Listen = ":7788"
 	}
@@ -157,6 +182,9 @@ func New(cfg Config) (*App, error) {
 			loader, err = ConfiguredMarkdownRegistry(cfg.ConfigFiles...)
 		}
 		if err != nil {
+			if mcpClient != nil {
+				_ = mcpClient.Close()
+			}
 			if owned {
 				_ = cfg.Store.Close()
 			}
@@ -169,7 +197,7 @@ func New(cfg Config) (*App, error) {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 30 * time.Second
 	}
-	a := &App{cfg: cfg, checkpoint: cfg.Checkpoint, runs: cfg.RunStore, events: cfg.Events, provider: cfg.Provider, registry: cfg.AgentRegistry, tracer: cfg.Tracer, schedules: schedules, clock: time.Now, timer: time.After, workflows: make(map[string]*registeredWorkflow), wake: make(chan struct{}, 1)}
+	a := &App{cfg: cfg, checkpoint: cfg.Checkpoint, runs: cfg.RunStore, events: cfg.Events, provider: cfg.Provider, registry: cfg.AgentRegistry, tracer: cfg.Tracer, mcpClient: mcpClient, schedules: schedules, clock: time.Now, timer: time.After, workflows: make(map[string]*registeredWorkflow), wake: make(chan struct{}, 1)}
 	if registry, ok := a.registry.(reloadableRegistry); ok {
 		registry.SetOnChange(func(status ConfigStatus) { a.events.Publish(Event{Kind: EventConfigChanged, Data: mustJSON(status)}) })
 	}
@@ -476,11 +504,7 @@ func (a *App) signal() {
 }
 
 func (a *App) Serve(ctx context.Context) error {
-	defer func() {
-		if a.ownedStore != nil {
-			_ = a.ownedStore.Close()
-		}
-	}()
+	defer a.Close()
 	if err := a.validateTriggers(); err != nil {
 		return err
 	}
@@ -535,6 +559,16 @@ func (a *App) Serve(ctx context.Context) error {
 		case <-shutdownCtx.Done():
 			return shutdownCtx.Err()
 		}
+	}
+}
+
+// Close releases connections and stores owned by the App. It is safe to call more than once.
+func (a *App) Close() {
+	if a.mcpClient != nil {
+		_ = a.mcpClient.Close()
+	}
+	if a.ownedStore != nil {
+		_ = a.ownedStore.Close()
 	}
 }
 

@@ -34,13 +34,46 @@ names, and checks referenced personas when a registry is active. Register every 
 | `AgentRegistry` | persona resolver |
 | `Tracer` | external traces; no-op by default |
 | `Agents`, `Skills`, `ConfigFiles` | registry path overrides |
-| `Tools` | executable tool registry |
+| `Tools` | executable tool registry; extended with discovered MCP tools |
+| `MCPServers` | MCP servers to discover at startup |
 | `Listen` | daemon address, default `:7788` |
 | `DrainTimeout` | graceful shutdown bound, default 30 seconds |
 | `DrainOnly` | resume compatible pinned work but reject new work |
 | `Triggers` | cron-scheduled workflow inputs |
 
 Ports are independent interfaces, so a custom store/provider/tracer does not change workflow definitions.
+
+## MCP tools
+
+Configure MCP servers through `Config.MCPServers`. Flow connects and lists tools during `app.New`; a failed connection or discovery prevents startup. Each discovered tool is exposed as `mcp__<server>__<tool>` and is added to the normal executable tool registry. Connections close when `Serve` returns (or when `App.Close` is called).
+
+```go
+import (
+    "github.com/bjaus/flow/app"
+    "github.com/bjaus/flow/app/mcp"
+)
+
+_, err := app.New(app.Config{
+    MCPServers: []mcp.Server{{
+        Name: "github",
+        Command: "npx",
+        Args: []string{"-y", "@modelcontextprotocol/server-github"},
+        // Env replaces the child process environment when non-empty. Supply
+        // credentials from the host environment rather than source code.
+    }},
+})
+```
+
+Import `github.com/bjaus/flow/app/mcp` for `mcp.Server`. A server has a `Command` plus `Args` (stdio), or a `URL`; URLs use Streamable HTTP by default and the legacy SSE transport when `SSE: true` is set. `Name` may contain letters, digits, `_`, and `-` only. Flow does not automatically grant discovered tools: explicitly grant each tool to a persona or role, including an argument pattern appropriate to the server's API.
+
+```yaml
+roles:
+  github-reader:
+    tools:
+      - "mcp__github__search_repositories(*)"
+```
+
+Flow currently exposes MCP **tools** only; it does not inject MCP resources or prompts into an agent. MCP tool calls run through the same deny-by-default grant guard as built-in and application-supplied tools. A grant is not a sandbox: only configure servers you trust, use narrowly scoped server credentials, and avoid blanket `(*)` grants when a server's arguments identify a resource that can be restricted.
 
 ## Runs and durability
 
@@ -104,6 +137,7 @@ A host can use the same operations without HTTP:
 - `Migrate` resolves `needs_migration` with `restart`, `abandon`, or `finish_on_previous`;
 - `ConfigStatus` and `ReloadConfig` manage the active persona/config snapshot;
 - `EventSink` exposes event subscription;
+- `Close` releases runtime-owned stores and MCP connections;
 - `Handler` returns the mounted API and web application;
 - `CLI` and `TUI` expose bundled clients.
 
