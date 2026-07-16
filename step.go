@@ -48,6 +48,22 @@ func Agent[In, Out any](name string, prompt func(In) string) Step[In, Out] {
 	}}
 }
 
+// StateDo is like Do but also gives the step read/write access to the workflow's shared state — an ambient
+// value (of any type you choose) for coordination that typed edges can't express cleanly, such as a blackboard
+// two steps both touch. Prefer edges and Bind when the data flow is linear; reach for shared state only for
+// genuine coordination. The state is per-graph: it is initialized lazily (get returns nil until first set)
+// and is NOT shared across a Parallel/Map fan-out boundary (each branch is its own graph). A workflow that
+// both uses state and pauses at a Human gate must register its state type with engine.Register so it can
+// cross the checkpoint.
+func StateDo[In, Out any](name string, fn func(ctx context.Context, in In, get func() any, set func(any)) (Out, error)) Step[In, Out] {
+	return Step[In, Out]{n: &ir.Node{
+		Kind: ir.KAction, Name: name, In: typeOf[In](), Out: typeOf[Out](),
+		StateInvoke: func(ctx context.Context, in any, get func() any, set func(any)) (any, error) {
+			return fn(ctx, in.(In), get, set)
+		},
+	}}
+}
+
 // Decision is the generic operator answer a human gate yields.
 type Decision struct {
 	Approved bool

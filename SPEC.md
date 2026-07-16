@@ -118,20 +118,26 @@ This section orients a runtime builder; it is not a re-specification. The public
 
 - **One core type, `flow.Step[In, Out]`** — a typed unit of execution, `In → Out`. Leaves and combinators are
   *both* steps, which is what makes composition unbounded.
-- **Leaves** (do work): `Do` (a plain typed function), `Agent` (an LLM step typed on input *and* output, whose
-  persona is resolved by name at runtime), `Human` (suspends the run for a person).
+- **Leaves** (do work): `Do` (a plain typed function — and the escape hatch for calling any eino component),
+  `StateDo` (a `Do` with read/write access to shared graph state, for coordination edges can't carry), `Agent`
+  (an LLM step typed on input *and* output, whose persona is resolved by name at runtime; if the persona has
+  tools it runs a real ReAct loop, else a single completion), `Human` (suspends the run for a person, on the
+  spine or nested inside a fan-out/bind/dispatch participant).
 - **Combinators** (arrange steps): `Then`/`Seq` (sequencing), `Parallel`/`Map` (fan-out), `Reduce` (fan-in),
   `Route` (static branch), `Loop` + `Gate`/`StateGate`/`Guard` (convergence-terminated cycles), `Bind` (lift a
   typed step into a same-typed state spine), `Router` and `Network` (dynamic dispatch over a runtime-chosen or
   runtime-membership set of participants).
 - **Entry point**: `flow.Define(name, desc, root)` produces a `flow.Workflow[In, Out]`. `Validate`, `Walk`,
   and `AgentNames` analyze a definition without any engine.
-- **The engine**: `engine.Compile(ctx, wf, registry, checkpointStore)` lowers a workflow to
-  `engine.Runnable[In, Out]`, which exposes `Invoke` (synchronous) and `Stream` (token-by-token). The engine is
-  built on cloudwego/eino and inherits, for free: real goroutine concurrency, per-step tracing spans, token
-  streaming (including inside concurrent fan-outs), and **durable interrupt/checkpoint/resume** that composes
-  through arbitrary nesting. `engine.Registry` is the seam that resolves a persona name to a runnable model
-  plus its system instruction.
+- **The engine**: `engine.Compile(ctx, wf, registry, checkpointStore, opts...)` lowers a workflow to
+  `engine.Runnable[In, Out]`, which exposes all four eino run modes — `Invoke`, `Stream` (token-by-token),
+  `Collect`, `Transform` — plus `Underlying()` to embed a workflow back into a hand-written eino graph. The
+  extra `opts` pass straight through to eino's compiler (a custom serializer, interrupt breakpoints, a DAG
+  trigger mode), and per-node run options target a step by its `Step.ID`. The engine is built on cloudwego/eino
+  and inherits, for free: real goroutine concurrency, per-step tracing spans, token streaming (including inside
+  concurrent fan-outs), and **durable interrupt/checkpoint/resume** that composes through arbitrary nesting.
+  `engine.Registry` is the seam that resolves a persona name to an `engine.Persona` (model, system instruction,
+  and tools). In short, flow deletes eino's boilerplate without hiding any of eino's seams (§5).
 
 **Durability contract the runtime relies on.** On resume, the engine restores checkpointed *state*, not values
 in flight on an edge. An interrupting step (a human gate) checkpoints its own input and, on resume, recovers it
@@ -457,9 +463,10 @@ An `Agent` step's actual LLM call goes through the `Provider` port, which builds
 - The **default** provider targets an **OpenAI-compatible gateway** (base URL and key from the environment),
   which lets an operator point every workflow at a local model server or a hosted endpoint without code
   changes, and centralizes rate/cost control.
-- A persona names its model; the provider builds the corresponding chat model bound to the gateway, with the
-  persona's tools attached. An `Agent`'s typed output defines a structured-output contract the runtime decodes
-  and, on a malformed response, retries.
+- A persona names its model and, optionally, tools by name. The app resolves those tool names to executable
+  tools (a small tool registry) and hands the engine a tool-bound `engine.Persona`, so a tool-bearing Agent
+  runs a native ReAct loop; the provider builds the chat model bound to the gateway. An `Agent`'s typed output
+  defines a structured-output contract the runtime decodes and, on a malformed response, retries.
 - A **fake provider** returns scripted structured outputs keyed by persona name and input. It is the backbone
   of the testing strategy (§14): any workflow, including the hardest multi-agent ones, runs deterministically
   with zero tokens.
@@ -903,8 +910,10 @@ zero tokens.
   - `app/observe`: the OpenTelemetry `Tracer` implementation (§6.5) — a run/step/agent span tree with
     GenAI/OpenInference attributes and an OTLP exporter configured from the environment. Verify against a local
     **Arize Phoenix** and confirm **Langfuse** works by pointing the same exporter at its OTLP endpoint.
-  - Compose `AgentRegistry` + `Provider` into the `engine.Registry` the worker passes to `engine.Compile`; ship
-    a small set of default persona/skill files.
+  - Compose `AgentRegistry` + `Provider` into the `engine.Registry` the worker passes to `engine.Compile`,
+    resolving each persona's tool names to executable tools (a small app tool registry) and setting them on the
+    `engine.Persona` so tool-bearing agents run their native ReAct loop; ship a small set of default
+    persona/skill files.
 - **Done when.** The loader parses sample personas/skills; editing a persona file changes behavior on the next
   invocation (tested via an injected watch event); the gateway provider builds a working model in an
   integration test that is **skipped when `FLOW_GATEWAY_URL` is unset**; malformed structured output triggers a

@@ -13,18 +13,27 @@ the engine.
 ## Compile and run
 
 ```go
-r, err := engine.Compile(ctx, wf, registry, checkpointStore) // returns engine.Runnable[In, Out]
-out, err := r.Invoke(ctx, in)                                // synchronous → typed Out
-sr,  err := r.Stream(ctx, in, compose.WithCallbacks(sink))   // → *schema.StreamReader[any]
+r, err := engine.Compile(ctx, wf, registry, checkpointStore, opts...) // engine.Runnable[In, Out]; opts are eino GraphCompileOptions
+out, err := r.Invoke(ctx, in)                                         // synchronous → typed Out
+sr,  err := r.Stream(ctx, in, compose.WithCallbacks(sink))            // → *schema.StreamReader[any]
+val, err := r.Collect(ctx, streamIn)                                  // streaming input → value
+str, err := r.Transform(ctx, streamIn)                                // streaming input → streaming output
+raw := r.Underlying()                                                 // the eino runnable, to nest a flow workflow back into an eino graph
 ```
 
-- `registry` implements `engine.Registry`:
-  `Persona(name string) (model.BaseChatModel, systemPrompt string, err error)` — resolve a persona name to a
-  chat model and its system instruction. `engine.RegistryFunc` adapts a plain func (used in tests with a fake
-  model). In the runtime, build the registry from a markdown persona (the `agent` package) + the model
-  provider.
+- `registry` implements `engine.Registry`: `Persona(name string) (engine.Persona, error)`, where
+  `engine.Persona{ Model model.BaseChatModel; System string; Tools []tool.BaseTool }`. Resolve a persona name
+  to its model, system instruction, and any tools. When `Tools` is non-empty the `Model` must implement
+  `model.ToolCallingChatModel`, and the Agent lowers to a native **ReAct loop** (ChatModel ⇄ ToolsNode) so it
+  actually calls tools; otherwise it is one completion. `engine.RegistryFunc` adapts a plain func (tests use a
+  fake model). In the runtime, build the registry from a markdown persona (the `agent` package) + the model
+  provider, resolving tool names to executable tools.
 - `checkpointStore` is an eino `compose.CheckPointStore` (pass `nil` to disable durability). The app's
-  `CheckpointStore` port adapts to this interface.
+  `CheckpointStore` port adapts to this interface. Durability composes through nesting: a `Human` inside a
+  `Parallel`/`Map` branch, a `Bind`, or a dispatch participant checkpoints and resumes at the exact point.
+- `opts` are passed straight through to eino's `Graph.Compile` (after flow's defaults, so they override them) —
+  use them for anything flow does not set: `compose.WithSerializer`, `compose.WithInterruptBeforeNodes`, a DAG
+  trigger mode, etc. Per-node run options target an Agent/Do node by its `Step.ID` via `DesignateNode`.
 
 ## Streaming tokens to the UI
 

@@ -13,12 +13,19 @@ coordination (fan-in, loops, blackboards).
 ## Leaves
 
 - `Do[In, Out](name string, fn func(context.Context, In) (Out, error)) Step[In, Out]` — a plain typed
-  function; the deterministic primitive.
+  function; the deterministic primitive. (Call any eino component from inside a `Do` to use it in a workflow.)
+- `StateDo[In, Out](name string, fn func(ctx context.Context, in In, get func() any, set func(any)) (Out, error)) Step[In, Out]`
+  — like `Do` but with read/write access to the workflow's shared state, for coordination the typed edges
+  can't carry. Per-graph; NOT shared across a `Parallel`/`Map` fan-out boundary. Prefer edges and `Bind` for
+  linear data flow.
 - `Agent[In, Out](name string, prompt func(In) string) Step[In, Out]` — an LLM step. The persona is resolved
   by name at runtime; `prompt` renders the typed input into the task; `Out` is the structured-output contract.
+  If the resolved persona has tools, the Agent runs a real ReAct loop (calls tools and iterates); otherwise a
+  single completion.
 - `Human[T](name string, apply func(T, Decision) T, prompt func(T) string) Step[T, T]` — suspends the run for
   a person. `apply` folds the operator's answer into the value. `Decision` is
-  `struct{ Approved bool; Feedback string }`.
+  `struct{ Approved bool; Feedback string }`. Works on the top-level spine AND nested inside a `Parallel`/
+  `Map` branch, a `Bind`, or a dispatch participant (durable resume at the exact point).
 
 ## Combinators
 

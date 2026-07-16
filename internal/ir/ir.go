@@ -30,13 +30,14 @@ const (
 
 // Erased behavior forms. The DSL wraps typed closures into these; the backend calls them.
 type (
-	Invoke    func(ctx context.Context, in any) (any, error)  // a leaf / fold
-	Predicate func(ctx context.Context, in any) (bool, error) // a gate
-	Selector  func(in any) string                             // a classifier / next-picker
-	Lens      func(s any) any                                 // read: S -> In
-	Merge     func(s any, out any) any                        // write: (S, Out) -> S
-	ApplyFn   func(in any, decision any) any                  // human: (T, Decision) -> T
-	RenderFn  func(in any) string                             // prompt render
+	Invoke      func(ctx context.Context, in any) (any, error)                                // a leaf / fold
+	StateInvoke func(ctx context.Context, in any, get func() any, set func(any)) (any, error) // a leaf with shared-state access
+	Predicate   func(ctx context.Context, in any) (bool, error)                               // a gate
+	Selector    func(in any) string                                                           // a classifier / next-picker
+	Lens        func(s any) any                                                               // read: S -> In
+	Merge       func(s any, out any) any                                                      // write: (S, Out) -> S
+	ApplyFn     func(in any, decision any) any                                                // human: (T, Decision) -> T
+	RenderFn    func(in any) string                                                           // prompt render
 )
 
 // Node is one step's erased definition. Kind selects which fields are meaningful.
@@ -48,9 +49,10 @@ type Node struct {
 	Out  reflect.Type
 
 	// leaves
-	Invoke  Invoke   // KAction
-	Persona string   // KAgent
-	Render  RenderFn // KAgent / KHuman
+	Invoke      Invoke      // KAction
+	StateInvoke StateInvoke // KAction variant with shared-state access (flow.StateDo)
+	Persona     string      // KAgent
+	Render      RenderFn    // KAgent / KHuman
 
 	// structure
 	Steps []*Node // KThen (2), KSeq / KParallel (N)

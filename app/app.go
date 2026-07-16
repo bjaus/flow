@@ -436,17 +436,23 @@ func (a *App) drain() error {
 }
 
 func (a *App) engineRegistry(ctx context.Context) engine.Registry {
-	return engine.RegistryFunc(func(name string) (model.BaseChatModel, string, error) {
+	return engine.RegistryFunc(func(name string) (engine.Persona, error) {
 		p := Persona{Name: name, Model: name}
 		if a.registry != nil {
 			var ok bool
 			p, ok = a.registry.Persona(name)
 			if !ok {
-				return nil, "", fmt.Errorf("persona %q not found", name)
+				return engine.Persona{}, fmt.Errorf("persona %q not found", name)
 			}
 		}
 		m, err := a.provider.Model(ctx, p)
-		return m, p.SystemInstruction, err
+		if err != nil {
+			return engine.Persona{}, err
+		}
+		// The engine seam supports tools natively (a ReAct loop when Persona.Tools is set). A persona's tool
+		// NAMES (p.Tools) are resolved to executable tools by the app's tool registry once that is wired;
+		// until then agents run tool-less.
+		return engine.Persona{Model: m, System: p.SystemInstruction}, nil
 	})
 }
 

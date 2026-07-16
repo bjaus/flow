@@ -37,8 +37,8 @@ func (m fakeModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Opt
 }
 
 func registry(replies map[string]string) engine.Registry {
-	return engine.RegistryFunc(func(name string) (model.BaseChatModel, string, error) {
-		return fakeModel{reply: replies[name]}, "you are the " + name, nil
+	return engine.RegistryFunc(func(name string) (engine.Persona, error) {
+		return engine.Persona{Model: fakeModel{reply: replies[name]}, System: "you are the " + name}, nil
 	})
 }
 
