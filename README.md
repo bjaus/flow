@@ -106,6 +106,9 @@ match command chaining or substitution. Gateway credentials come only from the e
 `app.Config` accepts independent checkpoint, run, event, provider, persona-registry, tracer, and tool ports.
 Omitted persistence defaults to pure-Go SQLite. `app.FakeProvider` scripts model output deterministically for
 zero-token tests. `app.Gateway` targets an OpenAI-compatible endpoint from `FLOW_GATEWAY_URL`.
+`Config.Triggers` schedules cron-driven runs: each `app.Trigger` pairs a registered workflow with a standard
+5-field cron spec and a canned JSON input; scheduled runs carry the trigger's name, and a firing is skipped
+(with a `trigger.skipped` event) while the daemon drains or the previous scheduled run is still active.
 
 ## Development
 

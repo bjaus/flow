@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS runs (
   workflow TEXT NOT NULL,
   fingerprint TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
+  trigger_name TEXT NOT NULL DEFAULT '',
   input BLOB NOT NULL,
   result BLOB,
   error TEXT NOT NULL DEFAULT '',

@@ -30,6 +30,7 @@ type Run struct {
 	Workflow      string          `json:"workflow"`
 	Fingerprint   string          `json:"fingerprint"`
 	Status        Status          `json:"status"`
+	Trigger       string          `json:"trigger,omitempty"`
 	Input         json.RawMessage `json:"input"`
 	Result        json.RawMessage `json:"result,omitempty"`
 	Error         string          `json:"error,omitempty"`
@@ -75,6 +76,7 @@ const (
 	EventRunResumed      EventKind = "run.resumed"
 	EventConfigChanged   EventKind = "config.changed"
 	EventConfigReloaded  EventKind = "config.reloaded"
+	EventTriggerSkipped  EventKind = "trigger.skipped"
 )
 
 type Event struct {

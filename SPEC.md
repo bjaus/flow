@@ -401,6 +401,7 @@ Events are the run's story, consumed identically by the TUI and the PWA. The kin
 - `gate.reached` — a human gate opened, carrying what the operator must see
 - `decision.applied` — a decision was folded in and the run resumed
 - `run.parked`, `run.resumed` — drain/redeploy transitions (§12)
+- `trigger.skipped` — a scheduled trigger (§6.6) declined to enqueue, with the reason
 
 Each event has a monotonic per-run sequence number so a late subscriber replays the log from the store and then
 follows live without gaps. The same event model feeds both presentation layers: the `/api` SSE stream carries
@@ -432,6 +433,18 @@ headers) — and the user chooses the destination:
 No backend is required, none is bundled, and a user who wants something other than OpenTelemetry implements the
 `Tracer` port directly. This is the pluggability principle of §5 applied to observability: rich insight when
 you want it, nothing forced when you don't.
+
+### 6.6 Scheduled triggers
+
+`Config.Triggers` declares cron-scheduled runs. Each `app.Trigger` names a registered workflow, a standard
+5-field cron spec (parsed with `github.com/robfig/cron/v3`), a canned JSON input, and an optional name
+(defaulting to `workflow@spec`). `New` rejects an invalid spec or a duplicate name; `Serve` rejects a trigger
+whose workflow is not registered or whose input does not decode to the workflow's input type. On each firing
+the daemon enqueues a run through the same path as `POST /api/runs`, stamping the run with the trigger's name
+(`Run.Trigger`) so scheduled runs are attributable. A firing is skipped — publishing a `trigger.skipped` event
+with the reason — while the daemon is draining or while the trigger's previous run is still `queued`,
+`running`, or `awaiting_review`, so a slow workflow never piles up behind its own schedule. The scheduler
+stops with the worker on shutdown.
 
 ---
 
@@ -992,6 +1005,6 @@ zero tokens.
 
 ### Phase 9 — Later (beyond v1)
 
-Out of scope for the first complete product, recorded so the design leaves room: additional triggers (cron,
-webhook, event); `Config.Workers > 1` for parallel independent runs; and the cloud phase (authentication, a
+Out of scope for the first complete product, recorded so the design leaves room: additional triggers (webhook,
+event — cron is implemented, §6.6); `Config.Workers > 1` for parallel independent runs; and the cloud phase (authentication, a
 remote daemon) that the split `/api`–`/ui` routes and the installable web app already anticipate.

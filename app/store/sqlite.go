@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +58,9 @@ var schema string
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("migrate sqlite: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN trigger_name TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
 	return nil
@@ -114,23 +118,23 @@ func (s *SQLiteStore) Save(ctx context.Context, r *core.Run) error {
 	if r.Decision != nil {
 		decision, _ = json.Marshal(r.Decision)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,workflow,fingerprint,status,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workflow=excluded.workflow,fingerprint=excluded.fingerprint,status=excluded.status,input=excluded.input,result=excluded.result,error=excluded.error,interrupt_id=excluded.interrupt_id,gate_prompt=excluded.gate_prompt,decision=excluded.decision,cancel_pending=excluded.cancel_pending,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`,
-		r.ID, r.Workflow, r.Fingerprint, r.Status, []byte(r.Input), []byte(r.Result), r.Error, r.InterruptID, r.GatePrompt, decision, r.CancelPending, r.CreatedAt, r.StartedAt, r.FinishedAt, r.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,workflow,fingerprint,status,trigger_name,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workflow=excluded.workflow,fingerprint=excluded.fingerprint,status=excluded.status,trigger_name=excluded.trigger_name,input=excluded.input,result=excluded.result,error=excluded.error,interrupt_id=excluded.interrupt_id,gate_prompt=excluded.gate_prompt,decision=excluded.decision,cancel_pending=excluded.cancel_pending,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`,
+		r.ID, r.Workflow, r.Fingerprint, r.Status, r.Trigger, []byte(r.Input), []byte(r.Result), r.Error, r.InterruptID, r.GatePrompt, decision, r.CancelPending, r.CreatedAt, r.StartedAt, r.FinishedAt, r.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("save run: %w", err)
 	}
 	return nil
 }
 
-const runColumns = `id,workflow,fingerprint,status,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at`
+const runColumns = `id,workflow,fingerprint,status,trigger_name,input,result,error,interrupt_id,gate_prompt,decision,cancel_pending,created_at,started_at,finished_at,updated_at`
 
 type scanner interface{ Scan(...any) error }
 
 func scanRun(row scanner) (*core.Run, error) {
 	r := &core.Run{}
 	var input, result, decision []byte
-	if err := row.Scan(&r.ID, &r.Workflow, &r.Fingerprint, &r.Status, &input, &result, &r.Error, &r.InterruptID, &r.GatePrompt, &decision, &r.CancelPending, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.UpdatedAt); err != nil {
+	if err := row.Scan(&r.ID, &r.Workflow, &r.Fingerprint, &r.Status, &r.Trigger, &input, &result, &r.Error, &r.InterruptID, &r.GatePrompt, &decision, &r.CancelPending, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
 	r.Input, r.Result = append([]byte(nil), input...), append([]byte(nil), result...)

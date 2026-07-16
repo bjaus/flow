@@ -54,6 +54,7 @@ const (
 	EventRunResumed      = core.EventRunResumed
 	EventConfigChanged   = core.EventConfigChanged
 	EventConfigReloaded  = core.EventConfigReloaded
+	EventTriggerSkipped  = core.EventTriggerSkipped
 )
 
 type Stores struct {

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bjaus/flow/app"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func open(t *testing.T) *app.Stores {
@@ -175,4 +177,25 @@ func TestEventsReplayThenLiveWithIndependentSequences(t *testing.T) {
 	require.Equal(t, "a", (<-all).RunID)
 	require.Equal(t, "b", (<-all).RunID)
 	require.Equal(t, "a", (<-all).RunID)
+}
+
+func TestMigrationAddsTriggerColumnToExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE runs (
+  id TEXT PRIMARY KEY, workflow TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+  input BLOB NOT NULL, result BLOB, error TEXT NOT NULL DEFAULT '', interrupt_id TEXT NOT NULL DEFAULT '',
+  gate_prompt TEXT NOT NULL DEFAULT '', decision BLOB, cancel_pending INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL, started_at TIMESTAMP, finished_at TIMESTAMP, updated_at TIMESTAMP NOT NULL)`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	s, err := app.SQLite(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	ctx := context.Background()
+	require.NoError(t, s.Runs.Save(ctx, &app.Run{ID: "1", Workflow: "w", Status: app.StatusQueued, Trigger: "nightly", Input: json.RawMessage(`1`)}))
+	got, err := s.Runs.Get(ctx, "1")
+	require.NoError(t, err)
+	require.Equal(t, "nightly", got.Trigger)
 }

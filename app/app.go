@@ -53,6 +53,10 @@ type Config struct {
 	Listen        string
 	DrainTimeout  time.Duration
 	DrainOnly     bool
+	// Triggers enqueues registered workflows on cron schedules (§6.6).
+	// Each spec is a standard 5-field cron expression; the canned input is
+	// validated against the workflow's input type when Serve starts.
+	Triggers []Trigger
 	// Tools maps tool names to the executable tools personas may be granted.
 	// When nil, New defaults it to tools.Default("."), the built-in bash and
 	// file tools confined to the current working directory.
@@ -90,6 +94,9 @@ type App struct {
 	registry   AgentRegistry
 	tracer     Tracer
 	ownedStore *Stores
+	schedules  []schedule
+	clock      func() time.Time
+	timer      func(time.Duration) <-chan time.Time
 
 	mu        sync.RWMutex
 	workflows map[string]*registeredWorkflow
@@ -99,6 +106,10 @@ type App struct {
 
 // New constructs a runtime, applying local defaults for omitted ports.
 func New(cfg Config) (*App, error) {
+	schedules, err := parseTriggers(cfg.Triggers)
+	if err != nil {
+		return nil, err
+	}
 	agentPathsExplicit := len(cfg.Agents) > 0 || len(cfg.Skills) > 0 || len(cfg.ConfigFiles) > 0
 	owned := false
 	if cfg.Store == nil && (cfg.Checkpoint == nil || cfg.RunStore == nil || cfg.Events == nil) {
@@ -158,7 +169,7 @@ func New(cfg Config) (*App, error) {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 30 * time.Second
 	}
-	a := &App{cfg: cfg, checkpoint: cfg.Checkpoint, runs: cfg.RunStore, events: cfg.Events, provider: cfg.Provider, registry: cfg.AgentRegistry, tracer: cfg.Tracer, workflows: make(map[string]*registeredWorkflow), wake: make(chan struct{}, 1)}
+	a := &App{cfg: cfg, checkpoint: cfg.Checkpoint, runs: cfg.RunStore, events: cfg.Events, provider: cfg.Provider, registry: cfg.AgentRegistry, tracer: cfg.Tracer, schedules: schedules, clock: time.Now, timer: time.After, workflows: make(map[string]*registeredWorkflow), wake: make(chan struct{}, 1)}
 	if registry, ok := a.registry.(reloadableRegistry); ok {
 		registry.SetOnChange(func(status ConfigStatus) { a.events.Publish(Event{Kind: EventConfigChanged, Data: mustJSON(status)}) })
 	}
@@ -342,6 +353,10 @@ func typeName(t reflect.Type) string {
 }
 
 func (a *App) Trigger(ctx context.Context, workflow string, input json.RawMessage) (string, error) {
+	return a.enqueue(ctx, workflow, input, "")
+}
+
+func (a *App) enqueue(ctx context.Context, workflow string, input json.RawMessage, trigger string) (string, error) {
 	if a.cfg.DrainOnly {
 		return "", errors.New("daemon is in drain-only mode")
 	}
@@ -358,7 +373,7 @@ func (a *App) Trigger(ctx context.Context, workflow string, input json.RawMessag
 		return "", fmt.Errorf("decode input: %w", err)
 	}
 	now := time.Now().UTC()
-	r := &Run{ID: uuid.NewString(), Workflow: workflow, Fingerprint: wf.info.Fingerprint, Status: StatusQueued, Input: append([]byte(nil), input...), CreatedAt: now, UpdatedAt: now}
+	r := &Run{ID: uuid.NewString(), Workflow: workflow, Fingerprint: wf.info.Fingerprint, Status: StatusQueued, Trigger: trigger, Input: append([]byte(nil), input...), CreatedAt: now, UpdatedAt: now}
 	if err := a.runs.Save(ctx, r); err != nil {
 		return "", err
 	}
@@ -461,6 +476,9 @@ func (a *App) Serve(ctx context.Context) error {
 			_ = a.ownedStore.Close()
 		}
 	}()
+	if err := a.validateTriggers(); err != nil {
+		return err
+	}
 	if err := a.recoverRuns(ctx); err != nil {
 		return err
 	}
@@ -484,6 +502,7 @@ func (a *App) Serve(ctx context.Context) error {
 	defer stopClaiming()
 	workerErr := make(chan error, 1)
 	go func() { workerErr <- a.work(claimCtx) }()
+	go a.runScheduler(claimCtx)
 	select {
 	case err := <-httpErr:
 		stopClaiming()
