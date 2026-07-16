@@ -20,6 +20,7 @@ import (
 	"github.com/bjaus/flow"
 	"github.com/bjaus/flow/app/agent"
 	"github.com/bjaus/flow/app/server"
+	"github.com/bjaus/flow/app/tools"
 	"github.com/bjaus/flow/app/tui"
 	"github.com/bjaus/flow/app/web"
 	"github.com/bjaus/flow/engine"
@@ -52,7 +53,10 @@ type Config struct {
 	Listen        string
 	DrainTimeout  time.Duration
 	DrainOnly     bool
-	Tools         map[string]tool.BaseTool
+	// Tools maps tool names to the executable tools personas may be granted.
+	// When nil, New defaults it to tools.Default("."), the built-in bash and
+	// file tools confined to the current working directory.
+	Tools map[string]tool.BaseTool
 }
 
 type WorkflowInfo struct {
@@ -123,6 +127,9 @@ func New(cfg Config) (*App, error) {
 	}
 	if cfg.Tracer == nil {
 		cfg.Tracer = NoopTracer()
+	}
+	if cfg.Tools == nil {
+		cfg.Tools = tools.Default(".")
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = ":7788"
