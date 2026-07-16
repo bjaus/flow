@@ -66,6 +66,12 @@ type fakeModel struct {
 	persona string
 }
 
+// WithTools accepts any tool set and keeps replying from the script, so tool-bearing personas run
+// deterministically with zero tokens. The scripted replies never emit tool calls.
+func (m *fakeModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
 func prompt(messages []*schema.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == schema.User {

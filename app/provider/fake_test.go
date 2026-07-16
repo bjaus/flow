@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bjaus/flow/app"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/require"
 )
@@ -52,4 +53,17 @@ func TestFakeProviderStreamsCompleteResponse(t *testing.T) {
 func TestFakeProviderRejectsMissingScript(t *testing.T) {
 	_, err := app.FakeProvider(nil).Model(context.Background(), app.Persona{Name: "missing"})
 	require.ErrorContains(t, err, "no script")
+}
+
+func TestFakeProviderSupportsToolBearingPersonas(t *testing.T) {
+	m, err := app.FakeProvider(app.FakeScript{"worker": {"*": {"done"}}}).
+		Model(context.Background(), app.Persona{Name: "worker"})
+	require.NoError(t, err)
+	toolModel, ok := m.(model.ToolCallingChatModel)
+	require.True(t, ok, "fake model must support tool-bearing personas")
+	configured, err := toolModel.WithTools(nil)
+	require.NoError(t, err)
+	msg, err := configured.Generate(context.Background(), []*schema.Message{schema.UserMessage("go")})
+	require.NoError(t, err)
+	require.Equal(t, "done", msg.Content)
 }
