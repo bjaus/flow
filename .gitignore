@@ -1,0 +1,18 @@
+# secrets — never commit
+.env
+
+# built binaries
+/flow
+/flowd
+/app/cmd/flowd/flowd
+
+# local data stores
+*.db
+*.db-wal
+*.db-shm
+
+# generated TUI recordings (the .tape source is committed; the .gif is not)
+tui/tapes/*.gif
+
+# os / editor
+.DS_Store
