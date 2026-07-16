@@ -9,3 +9,4 @@ is a symlink to it.
   - `flow-dsl` — authoring workflows with the `flow` package.
   - `engine-api` — compiling and running workflows via `engine` (streaming, durable HITL).
   - `verify-and-iterate` — `just` recipes, `vhs` TUI rendering, the gateway, determinism-first testing.
+  - `documentation-maintenance` — keep public user documentation synchronized with API and behavior changes.

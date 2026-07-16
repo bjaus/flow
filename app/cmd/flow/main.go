@@ -21,7 +21,7 @@ func main() {
 }
 func scaffold(root string) error {
 	files := map[string]string{
-		"go.mod": "module workflows\n\ngo 1.24\n",
+		"go.mod": "module workflows\n",
 		"main.go": `package main
 import("context";"log";"github.com/bjaus/flow";"github.com/bjaus/flow/app")
 func main(){wf:=flow.Define("hello","A starter workflow",flow.Do("hello",func(_ context.Context,in string)(string,error){return "Hello, "+in,nil}));a,err:=app.New(app.Config{});if err!=nil{log.Fatal(err)};if err=a.Register(wf);err!=nil{log.Fatal(err)};if err=a.CLI().Execute();err!=nil{log.Fatal(err)}}

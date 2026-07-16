@@ -51,7 +51,9 @@ etc.). Load the one relevant to your current task:
 
 - **`flow-dsl`** — the DSL public API, for authoring workflows in tests, examples, and the runtime.
   When choosing *which composition* expresses a multi-agent shape (pipeline, panel, generator–critic,
-  supervisor, swarm, …), consult **[PARADIGMS.md](./PARADIGMS.md)** alongside it.
+  supervisor, swarm, …), consult **[docs/PARADIGMS.md](./docs/PARADIGMS.md)** alongside it.
 - **`engine-api`** — how the runtime compiles and runs a workflow via `engine`, incl. streaming and durable
   interrupt/resume.
 - **`verify-and-iterate`** — the `just` recipes, `vhs` tapes, the gateway, and determinism-first testing.
+- **`documentation-maintenance`** — required for changes to public API or behavior; keeps user guides, package
+  comments, examples, CLI/API references, and the 34-pattern catalog synchronized.
