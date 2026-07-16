@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/bjaus/flow/app/internal/core"
+	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 )
 
@@ -82,6 +84,51 @@ func (l *Loader) Reload() error {
 	l.personas = personas
 	l.mu.Unlock()
 	return nil
+}
+
+// Watch reloads the registry whenever an agent or skill file changes. It blocks until ctx is canceled.
+func (l *Loader) Watch(ctx context.Context) error {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = watcher.Close() }()
+	for _, root := range []string{l.agents, l.skills} {
+		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return watcher.Add(path)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-watcher.Errors:
+			if err != nil {
+				return err
+			}
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+				if event.Op&fsnotify.Create != 0 {
+					if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
+						_ = watcher.Add(event.Name)
+					}
+				}
+				_ = l.Reload()
+			}
+		}
+	}
 }
 
 func (l *Loader) Persona(name string) (core.Persona, bool) {

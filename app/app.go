@@ -8,19 +8,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bjaus/flow"
 	"github.com/bjaus/flow/app/server"
+	"github.com/bjaus/flow/app/tui"
+	"github.com/bjaus/flow/app/web"
 	"github.com/bjaus/flow/engine"
 	"github.com/bjaus/flow/internal/ir"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
@@ -45,6 +51,7 @@ type Config struct {
 	Listen        string
 	DrainTimeout  time.Duration
 	DrainOnly     bool
+	Tools         map[string]tool.BaseTool
 }
 
 type WorkflowInfo struct {
@@ -74,9 +81,12 @@ type App struct {
 	mu        sync.RWMutex
 	workflows map[string]*registeredWorkflow
 	wake      chan struct{}
+	draining  atomic.Bool
 }
 
+// New constructs a runtime, applying local defaults for omitted ports.
 func New(cfg Config) (*App, error) {
+	agentPathsExplicit := cfg.Agents != "" || cfg.Skills != ""
 	owned := false
 	if cfg.Store == nil && (cfg.Checkpoint == nil || cfg.RunStore == nil || cfg.Events == nil) {
 		s, err := SQLite("flow.db")
@@ -114,6 +124,20 @@ func New(cfg Config) (*App, error) {
 	if cfg.Skills == "" {
 		cfg.Skills = "./skills"
 	}
+	if cfg.AgentRegistry == nil {
+		_, agentsErr := os.Stat(cfg.Agents)
+		_, skillsErr := os.Stat(cfg.Skills)
+		if agentPathsExplicit || (agentsErr == nil && skillsErr == nil) {
+			loader, err := MarkdownRegistry(cfg.Agents, cfg.Skills)
+			if err != nil {
+				if owned {
+					_ = cfg.Store.Close()
+				}
+				return nil, fmt.Errorf("agent registry: %w", err)
+			}
+			cfg.AgentRegistry = loader
+		}
+	}
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 30 * time.Second
 	}
@@ -143,6 +167,21 @@ func workflowMetadata(wf AnyWorkflow) (string, string, error) {
 	return name, desc, nil
 }
 
+// Serve constructs a default App, registers workflows, and blocks until ctx is canceled.
+func Serve(ctx context.Context, workflows ...AnyWorkflow) error {
+	a, err := New(Config{})
+	if err != nil {
+		return err
+	}
+	for _, wf := range workflows {
+		if err := a.Register(wf); err != nil {
+			return err
+		}
+	}
+	return a.Serve(ctx)
+}
+
+// Register validates and registers a workflow by name.
 func (a *App) Register(wf AnyWorkflow) error {
 	if wf == nil {
 		return errors.New("register: nil workflow")
@@ -153,6 +192,13 @@ func (a *App) Register(wf AnyWorkflow) error {
 	}
 	if problems := wf.Validate(); len(problems) > 0 {
 		return fmt.Errorf("register %q: %s", name, strings.Join(problems, "; "))
+	}
+	for _, personaName := range wf.AgentNames() {
+		if a.registry != nil {
+			if _, ok := a.registry.Persona(personaName); !ok {
+				return fmt.Errorf("register %q: persona %q not found", name, personaName)
+			}
+		}
 	}
 	root := wf.Definition()
 	if root == nil {
@@ -188,6 +234,32 @@ func (a *App) RegisteredWorkflows() []server.WorkflowInfo {
 	return out
 }
 
+func (a *App) RegisteredWebWorkflows() []web.WorkflowInfo {
+	workflows := a.Workflows()
+	out := make([]web.WorkflowInfo, len(workflows))
+	for i, wf := range workflows {
+		out[i] = web.WorkflowInfo{Name: wf.Name, Description: wf.Description, InputType: wf.InputType, OutputType: wf.OutputType, Fingerprint: wf.Fingerprint}
+	}
+	return out
+}
+
+// Handler returns the daemon's JSON API and embedded web application.
+func (a *App) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/", server.New(a))
+	webHandler, err := web.New(a)
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		})
+	}
+	mux.Handle("/", webHandler)
+	return mux
+}
+
+// TUI runs the terminal client against endpoint.
+func (a *App) TUI(ctx context.Context, endpoint string) error { return tui.Run(ctx, endpoint) }
+
 func (a *App) ListRuns(ctx context.Context, filter RunFilter) ([]*Run, error) {
 	return a.runs.List(ctx, filter)
 }
@@ -200,10 +272,10 @@ func fingerprint(root *ir.Node) string {
 	var walk func(*ir.Node)
 	walk = func(n *ir.Node) {
 		if n == nil {
-			io.WriteString(h, "nil;")
+			_, _ = io.WriteString(h, "nil;")
 			return
 		}
-		fmt.Fprintf(h, "%d|%s|%s|%s|%d{", n.Kind, n.ID, typeName(n.In), typeName(n.Out), len(n.Steps))
+		_, _ = fmt.Fprintf(h, "%d|%s|%s|%s|%d{", n.Kind, n.ID, typeName(n.In), typeName(n.Out), len(n.Steps))
 		for _, child := range n.Steps {
 			walk(child)
 		}
@@ -215,11 +287,11 @@ func fingerprint(root *ir.Node) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			io.WriteString(h, key)
+			_, _ = io.WriteString(h, key)
 			walk(n.Cases[key])
 		}
 		walk(n.Default)
-		io.WriteString(h, "}")
+		_, _ = io.WriteString(h, "}")
 	}
 	walk(root)
 	return hex.EncodeToString(h.Sum(nil))
@@ -233,6 +305,9 @@ func typeName(t reflect.Type) string {
 }
 
 func (a *App) Trigger(ctx context.Context, workflow string, input json.RawMessage) (string, error) {
+	if a.cfg.DrainOnly {
+		return "", errors.New("daemon is in drain-only mode")
+	}
 	a.mu.RLock()
 	wf := a.workflows[workflow]
 	a.mu.RUnlock()
@@ -352,27 +427,50 @@ func (a *App) Serve(ctx context.Context) error {
 	if err := a.recoverRuns(ctx); err != nil {
 		return err
 	}
-	httpServer := &http.Server{Addr: a.cfg.Listen, Handler: server.New(a), ReadHeaderTimeout: 10 * time.Second}
+	httpServer := &http.Server{Addr: a.cfg.Listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	listener, err := net.Listen("tcp", a.cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", a.cfg.Listen, err)
+	}
 	httpErr := make(chan error, 1)
 	go func() {
-		err := httpServer.ListenAndServe()
+		err := httpServer.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
 		httpErr <- err
 	}()
+	claimCtx, stopClaiming := context.WithCancel(context.Background())
+	defer stopClaiming()
 	workerErr := make(chan error, 1)
-	go func() { workerErr <- a.work(ctx) }()
+	go func() { workerErr <- a.work(claimCtx) }()
 	select {
 	case err := <-httpErr:
+		stopClaiming()
+		select {
+		case <-workerErr:
+		case <-time.After(a.cfg.DrainTimeout):
+		}
 		return err
 	case err := <-workerErr:
+		_ = httpServer.Close()
+		select {
+		case <-httpErr:
+		case <-time.After(a.cfg.DrainTimeout):
+		}
 		return err
 	case <-ctx.Done():
+		a.draining.Store(true)
+		stopClaiming()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.DrainTimeout)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
-		return a.drain()
+		select {
+		case err := <-workerErr:
+			return err
+		case <-shutdownCtx.Done():
+			return shutdownCtx.Err()
+		}
 	}
 }
 
@@ -397,7 +495,19 @@ func (a *App) work(ctx context.Context) error {
 			if r == nil {
 				break
 			}
-			if err := a.execute(ctx, r); err != nil && ctx.Err() == nil {
+			if a.cfg.DrainOnly {
+				a.mu.RLock()
+				wf := a.workflows[r.Workflow]
+				a.mu.RUnlock()
+				if wf == nil || wf.info.Fingerprint != r.Fingerprint {
+					r.Status = StatusQueued
+					if err := a.runs.Save(context.Background(), r); err != nil {
+						return err
+					}
+					break
+				}
+			}
+			if err := a.execute(context.Background(), r); err != nil && ctx.Err() == nil {
 				return err
 			}
 		}
@@ -428,13 +538,6 @@ func (a *App) recoverRuns(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) drain() error {
-	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.DrainTimeout)
-	defer cancel()
-	_ = ctx
-	return nil
-}
-
 func (a *App) engineRegistry(ctx context.Context) engine.Registry {
 	return engine.RegistryFunc(func(name string) (engine.Persona, error) {
 		p := Persona{Name: name, Model: name}
@@ -449,10 +552,15 @@ func (a *App) engineRegistry(ctx context.Context) engine.Registry {
 		if err != nil {
 			return engine.Persona{}, err
 		}
-		// The engine seam supports tools natively (a ReAct loop when Persona.Tools is set). A persona's tool
-		// NAMES (p.Tools) are resolved to executable tools by the app's tool registry once that is wired;
-		// until then agents run tool-less.
-		return engine.Persona{Model: m, System: p.SystemInstruction}, nil
+		tools := make([]tool.BaseTool, 0, len(p.Tools))
+		for _, toolName := range p.Tools {
+			executable, ok := a.cfg.Tools[toolName]
+			if !ok {
+				return engine.Persona{}, fmt.Errorf("persona %q: tool %q is not registered", name, toolName)
+			}
+			tools = append(tools, executable)
+		}
+		return engine.Persona{Model: m, System: p.SystemInstruction, Tools: tools}, nil
 	})
 }
 
@@ -473,27 +581,36 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 		return a.fail(run, err)
 	}
 	runCtx, span := a.tracer.StartRun(ctx, run)
+	runCtx, cancelRun := context.WithCancel(runCtx)
+	defer cancelRun()
 	a.events.Publish(Event{RunID: run.ID, Kind: EventRunStarted})
-	cb := &eventCallbacks{runID: run.ID, events: a.events, tracer: a.tracer}
+	cb := &eventCallbacks{runID: run.ID, events: a.events, tracer: a.tracer, runs: a.runs, cancel: cancelRun, draining: &a.draining}
 	opts := []compose.Option{compose.WithCheckPointID(run.ID), compose.WithCallbacks(cb)}
 	if run.Decision != nil && run.InterruptID != "" {
 		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, flow.Decision{Approved: run.Decision.Approved, Feedback: run.Decision.Feedback})
 		run.Decision = nil
 	}
-	sr, err := runnable.Stream(runCtx, in, opts...)
 	var out any
-	if err == nil {
-		defer sr.Close()
-		for {
-			chunk, recvErr := sr.Recv()
-			if recvErr == io.EOF {
-				break
+	for attempt := 0; attempt < 2; attempt++ {
+		out = nil
+		sr, streamErr := runnable.Stream(runCtx, in, opts...)
+		err = streamErr
+		if err == nil {
+			for {
+				chunk, recvErr := sr.Recv()
+				if recvErr == io.EOF {
+					break
+				}
+				if recvErr != nil {
+					err = recvErr
+					break
+				}
+				out = chunk
 			}
-			if recvErr != nil {
-				err = recvErr
-				break
-			}
-			out = chunk
+			sr.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "agent output did not match") {
+			break
 		}
 	}
 	span.End(err)
@@ -517,6 +634,24 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 		return nil
 	}
 	if err != nil {
+		if a.draining.Load() {
+			run.Status = StatusParked
+			if saveErr := a.runs.Save(context.Background(), run); saveErr != nil {
+				return saveErr
+			}
+			a.events.Publish(Event{RunID: run.ID, Kind: EventRunParked})
+			return nil
+		}
+		latest, getErr := a.runs.Get(context.Background(), run.ID)
+		if getErr == nil && latest.CancelPending {
+			now := time.Now().UTC()
+			latest.Status, latest.CancelPending, latest.FinishedAt = StatusCanceled, false, &now
+			if saveErr := a.runs.Save(context.Background(), latest); saveErr != nil {
+				return saveErr
+			}
+			a.events.Publish(Event{RunID: run.ID, Kind: EventRunFinished, Data: mustJSON(map[string]any{"status": StatusCanceled})})
+			return nil
+		}
 		return a.fail(run, err)
 	}
 	result, err := json.Marshal(out)
@@ -552,25 +687,49 @@ func (a *App) fail(run *Run, cause error) error {
 func mustJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
 
 type eventCallbacks struct {
-	runID  string
-	events EventSink
-	tracer Tracer
+	runID    string
+	events   EventSink
+	tracer   Tracer
+	runs     RunStore
+	cancel   context.CancelFunc
+	draining *atomic.Bool
 }
+type callbackSpanKey struct{}
 
 func (c *eventCallbacks) OnStart(ctx context.Context, info *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
 	if info == nil || info.Component == "Graph" {
 		return ctx
 	}
 	c.events.Publish(Event{RunID: c.runID, Kind: EventStepStarted, Data: mustJSON(map[string]string{"label": info.Name, "kind": string(info.Component)})})
-	return ctx
+	var sp Span
+	if info.Component == "ChatModel" {
+		ctx, sp = c.tracer.StartAgent(ctx, c.runID, info.Name)
+	} else {
+		ctx, sp = c.tracer.StartStep(ctx, c.runID, info.Name, string(info.Component))
+	}
+	return context.WithValue(ctx, callbackSpanKey{}, sp)
 }
 func (c *eventCallbacks) OnEnd(ctx context.Context, info *callbacks.RunInfo, _ callbacks.CallbackOutput) context.Context {
 	if info != nil && info.Component != "Graph" {
 		c.events.Publish(Event{RunID: c.runID, Kind: EventStepFinished, Data: mustJSON(map[string]string{"label": info.Name, "kind": string(info.Component)})})
 	}
+	if sp, ok := ctx.Value(callbackSpanKey{}).(Span); ok {
+		sp.End(nil)
+	}
+	if c.draining != nil && c.draining.Load() {
+		c.cancel()
+	}
+	if c.runs != nil {
+		if run, err := c.runs.Get(context.Background(), c.runID); err == nil && run.CancelPending {
+			c.cancel()
+		}
+	}
 	return ctx
 }
-func (c *eventCallbacks) OnError(ctx context.Context, _ *callbacks.RunInfo, _ error) context.Context {
+func (c *eventCallbacks) OnError(ctx context.Context, _ *callbacks.RunInfo, err error) context.Context {
+	if sp, ok := ctx.Value(callbackSpanKey{}).(Span); ok {
+		sp.End(err)
+	}
 	return ctx
 }
 func (c *eventCallbacks) OnStartWithStreamInput(ctx context.Context, _ *callbacks.RunInfo, in *schema.StreamReader[callbacks.CallbackInput]) context.Context {
@@ -582,17 +741,15 @@ func (c *eventCallbacks) OnEndWithStreamOutput(ctx context.Context, info *callba
 		out.Close()
 		return ctx
 	}
-	go func() {
-		defer out.Close()
-		for {
-			chunk, err := out.Recv()
-			if err != nil {
-				return
-			}
-			if mo := model.ConvCallbackOutput(chunk); mo != nil && mo.Message != nil {
-				c.events.Publish(Event{RunID: c.runID, Kind: EventAgentToken, Data: mustJSON(map[string]string{"label": info.Name, "delta": mo.Message.Content})})
-			}
+	defer out.Close()
+	for {
+		chunk, err := out.Recv()
+		if err != nil {
+			break
 		}
-	}()
+		if mo := model.ConvCallbackOutput(chunk); mo != nil && mo.Message != nil {
+			c.events.Publish(Event{RunID: c.runID, Kind: EventAgentToken, Data: mustJSON(map[string]string{"label": info.Name, "delta": mo.Message.Content})})
+		}
+	}
 	return ctx
 }

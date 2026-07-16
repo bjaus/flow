@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ type SQLiteStore struct {
 type subscriber struct {
 	runID string
 	ch    chan core.Event
+	seen  map[string]int64
 }
 
 func OpenSQLite(path string) (*SQLiteStore, error) {
@@ -40,59 +42,35 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err = db.ExecContext(ctx, `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("configure sqlite: %w", err)
 	}
 	if err = migrate(ctx, db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &SQLiteStore{db: db, subs: make(map[uint64]*subscriber)}, nil
 }
 
+//go:embed schema.sql
+var schema string
+
 func migrate(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS checkpoints (
-  id TEXT PRIMARY KEY,
-  data BLOB NOT NULL,
-  updated_at TIMESTAMP NOT NULL
-);
-CREATE TABLE IF NOT EXISTS runs (
-  id TEXT PRIMARY KEY,
-  workflow TEXT NOT NULL,
-  fingerprint TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL,
-  input BLOB NOT NULL,
-  result BLOB,
-  error TEXT NOT NULL DEFAULT '',
-  interrupt_id TEXT NOT NULL DEFAULT '',
-  gate_prompt TEXT NOT NULL DEFAULT '',
-  decision BLOB,
-  cancel_pending INTEGER NOT NULL DEFAULT 0,
-  created_at TIMESTAMP NOT NULL,
-  started_at TIMESTAMP,
-  finished_at TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL
-);
-CREATE INDEX IF NOT EXISTS runs_queue ON runs(status, created_at, id);
-CREATE INDEX IF NOT EXISTS runs_workflow ON runs(workflow, status);
-CREATE TABLE IF NOT EXISTS events (
-  run_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  at TIMESTAMP NOT NULL,
-  data BLOB,
-  PRIMARY KEY(run_id, seq)
-);
-CREATE INDEX IF NOT EXISTS events_at ON events(at, run_id, seq);
-`)
-	if err != nil {
+	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
 	return nil
 }
 
-func (s *SQLiteStore) Close() error                   { return s.db.Close() }
+func (s *SQLiteStore) Close() error {
+	s.mu.Lock()
+	for id, sub := range s.subs {
+		delete(s.subs, id)
+		close(sub.ch)
+	}
+	s.mu.Unlock()
+	return s.db.Close()
+}
 func (s *SQLiteStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *SQLiteStore) Get(ctx context.Context, id string) ([]byte, bool, error) {
@@ -200,7 +178,7 @@ func (r *Runs) List(ctx context.Context, f core.RunFilter) ([]*core.Run, error) 
 	if err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []*core.Run
 	for rows.Next() {
 		run, err := scanRun(rows)
@@ -220,8 +198,8 @@ func (r *Runs) Claim(ctx context.Context) (*core.Run, error) {
 	if err != nil {
 		return nil, fmt.Errorf("claim begin: %w", err)
 	}
-	defer tx.Rollback()
-	run, err := scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE status IN (?,?) ORDER BY created_at,id LIMIT 1`, core.StatusQueued, core.StatusParked))
+	defer func() { _ = tx.Rollback() }()
+	run, err := scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE status=? ORDER BY created_at,id LIMIT 1`, core.StatusQueued))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -229,7 +207,7 @@ func (r *Runs) Claim(ctx context.Context) (*core.Run, error) {
 		return nil, fmt.Errorf("claim select: %w", err)
 	}
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx, `UPDATE runs SET status=?,started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status IN (?,?)`, core.StatusRunning, now, now, run.ID, core.StatusQueued, core.StatusParked)
+	res, err := tx.ExecContext(ctx, `UPDATE runs SET status=?,started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status=?`, core.StatusRunning, now, now, run.ID, core.StatusQueued)
 	if err != nil {
 		return nil, fmt.Errorf("claim update: %w", err)
 	}
@@ -254,15 +232,18 @@ func (s *SQLiteStore) Publish(e core.Event) {
 		e.At = time.Now().UTC()
 	}
 	if e.Seq == 0 {
-		if err := s.db.QueryRow(`SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?`, e.RunID).Scan(&e.Seq); err != nil {
+		err := s.db.QueryRowContext(context.Background(), `INSERT INTO events(run_id,seq,kind,at,data) VALUES(?,(SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?),?,?,?) RETURNING seq`, e.RunID, e.RunID, e.Kind, e.At, []byte(e.Data)).Scan(&e.Seq)
+		if err != nil {
+			return
+		}
+	} else {
+		if _, err := s.db.ExecContext(context.Background(), `INSERT OR IGNORE INTO events(run_id,seq,kind,at,data) VALUES(?,?,?,?,?)`, e.RunID, e.Seq, e.Kind, e.At, []byte(e.Data)); err != nil {
 			return
 		}
 	}
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO events(run_id,seq,kind,at,data) VALUES(?,?,?,?,?)`, e.RunID, e.Seq, e.Kind, e.At, []byte(e.Data)); err != nil {
-		return
-	}
 	for _, sub := range s.subs {
-		if sub.runID == "" || sub.runID == e.RunID {
+		if (sub.runID == "" || sub.runID == e.RunID) && e.Seq > sub.seen[e.RunID] {
+			sub.seen[e.RunID] = e.Seq
 			select {
 			case sub.ch <- e:
 			default:
@@ -274,7 +255,6 @@ func (s *SQLiteStore) Publish(e core.Event) {
 func (s *SQLiteStore) Subscribe(runID string) (<-chan core.Event, func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ch := make(chan core.Event, 256)
 	q := `SELECT run_id,seq,kind,at,data FROM events`
 	var rows *sql.Rows
 	var err error
@@ -283,20 +263,91 @@ func (s *SQLiteStore) Subscribe(runID string) (<-chan core.Event, func()) {
 	} else {
 		rows, err = s.db.Query(q+` WHERE run_id=? ORDER BY seq`, runID)
 	}
+	var history []core.Event
 	if err == nil {
 		for rows.Next() {
 			var e core.Event
 			var data []byte
 			if rows.Scan(&e.RunID, &e.Seq, &e.Kind, &e.At, &data) == nil {
 				e.Data = append([]byte(nil), data...)
-				ch <- e
+				history = append(history, e)
 			}
 		}
-		rows.Close()
+		_ = rows.Close()
+	}
+	ch := make(chan core.Event, len(history)+256)
+	seen := make(map[string]int64)
+	for _, e := range history {
+		ch <- e
+		if e.Seq > seen[e.RunID] {
+			seen[e.RunID] = e.Seq
+		}
 	}
 	s.nextID++
 	id := s.nextID
-	s.subs[id] = &subscriber{runID: runID, ch: ch}
+	s.subs[id] = &subscriber{runID: runID, ch: ch, seen: seen}
+	go s.pollSubscriber(id)
 	var once sync.Once
-	return ch, func() { once.Do(func() { s.mu.Lock(); delete(s.subs, id); close(ch); s.mu.Unlock() }) }
+	return ch, func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if _, ok := s.subs[id]; ok {
+				delete(s.subs, id)
+				close(ch)
+			}
+			s.mu.Unlock()
+		})
+	}
+}
+
+func (s *SQLiteStore) pollSubscriber(id uint64) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.mu.Lock()
+		sub := s.subs[id]
+		if sub == nil {
+			s.mu.Unlock()
+			return
+		}
+		runID := sub.runID
+		s.mu.Unlock()
+		q := `SELECT run_id,seq,kind,at,data FROM events`
+		args := []any{}
+		if runID != "" {
+			q += ` WHERE run_id=?`
+			args = append(args, runID)
+		}
+		q += ` ORDER BY at,run_id,seq`
+		rows, err := s.db.QueryContext(context.Background(), q, args...)
+		if err != nil {
+			continue
+		}
+		var events []core.Event
+		for rows.Next() {
+			var e core.Event
+			var data []byte
+			if rows.Scan(&e.RunID, &e.Seq, &e.Kind, &e.At, &data) == nil {
+				e.Data = append([]byte(nil), data...)
+				events = append(events, e)
+			}
+		}
+		_ = rows.Close()
+		s.mu.Lock()
+		sub = s.subs[id]
+		if sub == nil {
+			s.mu.Unlock()
+			return
+		}
+		for _, e := range events {
+			if e.Seq > sub.seen[e.RunID] {
+				sub.seen[e.RunID] = e.Seq
+				select {
+				case sub.ch <- e:
+				default:
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
 }

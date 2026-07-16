@@ -1,31 +1,105 @@
 # flow
 
-A local-first, single-binary Go platform for authoring and running durable, long-lived agentic workflows.
+**Type-safe Go workflows, durable local execution, and human steering in one binary.**
 
-- **Author** workflows in type-safe Go with the `flow` package — one core `Step[In, Out]` type, composed
-  without limit.
-- **Run, observe, and steer** them with the `flow/app` runtime: a durable daemon that serves a terminal UI, a
-  command-line client, and an installable web app over one HTTP + SSE API. Backends (checkpoint/run store,
-  model provider) are pluggable interfaces with zero-config local defaults.
+```go
+package main
 
-## Status
+import (
+    "context"
+    "log"
+    "github.com/bjaus/flow"
+    "github.com/bjaus/flow/app"
+)
 
-The `flow` DSL and its `engine` are built and tested. The `app/` runtime is under construction per
-**[SPEC.md](./SPEC.md)**. Contributors and coding agents: start with **[AGENTS.md](./AGENTS.md)**.
-
-## Modules
-
-- `github.com/bjaus/flow` — the DSL (`package flow`) + `engine`. Import this to author workflows.
-- `github.com/bjaus/flow/app` — the runtime. Import this to build a daemon that runs and serves them.
-
-## Repository map
-
+func main() {
+    wf := flow.Define("hello", "Greet someone",
+        flow.Do("greet", func(_ context.Context, name string) (string, error) {
+            return "Hello, " + name, nil
+        }))
+    a, err := app.New(app.Config{})
+    if err != nil { log.Fatal(err) }
+    if err = a.Register(wf); err != nil { log.Fatal(err) }
+    if err = a.CLI().Execute(); err != nil { log.Fatal(err) }
+}
 ```
-.                     the flow DSL (package flow)
-engine/               compiles a workflow to a runnable graph (streaming, durable HITL)
-internal/ir/          the erased definition tree the DSL and engine share
-app/                  the runtime (to be built — SPEC.md §16)
-SPEC.md               the build specification (source of truth)
-AGENTS.md             how to work in this repo  (CLAUDE.md symlinks here)
-.agents/skills/       task-specific guides for coding agents
+
+```sh
+mkdir my-workflows && cd my-workflows
+go mod init my-workflows
+go get github.com/bjaus/flow/app
+go build .
+./my-workflows serve
 ```
+
+Or scaffold the same project with `go run github.com/bjaus/flow/app/cmd/flow@latest init`.
+
+The default daemon listens on `:7788`, stores runs and checkpoints in `./flow.db`, and serves:
+
+- the JSON and SSE API at `/api`;
+- the installable, offline-shell web app at `http://localhost:7788`;
+- `./my-workflows tui` for the terminal client;
+- `workflows` and `runs` commands for scripts and CI.
+
+## Mental model
+
+There is one core authoring type: `flow.Step[In, Out]`. **Leaves do work** and **combinators arrange work**;
+every combinator returns another step, so nesting is unlimited and Go checks every edge.
+
+### Leaves
+
+- `Do` — deterministic Go code and the escape hatch for any component.
+- `StateDo` — code with graph-local blackboard access; prefer typed edges when possible.
+- `Agent` — a typed model task. Its name resolves a markdown persona at runtime.
+- `Human` — a durable gate that checkpoints and resumes with an operator decision.
+
+An agent file is a reusable **persona**. The `prompt` passed to `Agent` is the per-invocation **task**. Do not
+put a task into the persona or model configuration into workflow code.
+
+### Composition
+
+- `Then` / `Seq` — typed sequencing; use `Seq` for a same-type state spine.
+- `Parallel` / `Map` / `Reduce` — fixed or runtime fan-out and fan-in.
+- `Route` — one static branch selected by data.
+- `Loop` / `Guard` — bounded convergence and tripwires.
+- `Bind` — lift a differently typed step into a state spine with read/write lenses.
+- `Router` — dynamic turn selection over fixed participants.
+- `Network` — runtime membership represented in checkpointed state.
+
+See [`examples/`](./examples), package examples in [`examples_test.go`](./examples_test.go), and the complete
+runtime contract in [`SPEC.md`](./SPEC.md).
+
+## Personas and skills
+
+Personas are Markdown with YAML frontmatter:
+
+```md
+---
+name: planner
+model: local
+skills: [review]
+tools: []
+---
+You create concise, executable plans.
+```
+
+Skills use the portable `SKILL.md` convention. Both directories hot-reload; edits affect the next agent call
+without rebuilding or disturbing in-flight runs. Gateway configuration and credentials come only from the
+environment; copy [`.env.example`](./.env.example).
+
+## Runtime configuration
+
+`app.Config` accepts independent checkpoint, run, event, provider, persona-registry, tracer, and tool ports.
+Omitted persistence defaults to pure-Go SQLite. `app.FakeProvider` scripts model output deterministically for
+zero-token tests. `app.Gateway` targets an OpenAI-compatible endpoint from `FLOW_GATEWAY_URL`.
+
+## Development
+
+This repository contains two Go modules joined by `go.work`: the lightweight DSL/engine at the root and the
+runtime under `app/`. Run the complete merge gate with:
+
+```sh
+just check
+```
+
+See [`AGENTS.md`](./AGENTS.md) for repository conventions.

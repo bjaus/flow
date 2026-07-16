@@ -158,14 +158,14 @@ func (h *Handler) sse(w http.ResponseWriter, r *http.Request, runID string) {
 				return
 			}
 			data, _ := json.Marshal(e)
-			fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", e.RunID, e.Seq, e.Kind, data)
+			_, _ = fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", e.RunID, e.Seq, e.Kind, data)
 			flusher.Flush()
 		}
 	}
 }
 
 func decode(r *http.Request, dst any) error {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

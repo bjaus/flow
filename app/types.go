@@ -1,8 +1,11 @@
 package app
 
 import (
+	"context"
+
 	"github.com/bjaus/flow/app/agent"
 	"github.com/bjaus/flow/app/internal/core"
+	"github.com/bjaus/flow/app/observe"
 	"github.com/bjaus/flow/app/provider"
 	"github.com/bjaus/flow/app/store"
 )
@@ -80,3 +83,8 @@ func MarkdownRegistry(agentsDir, skillsDir string) (*agent.Loader, error) {
 	return agent.New(agentsDir, skillsDir)
 }
 func NoopTracer() Tracer { return core.NoopTracer() }
+
+// OTLPTracer builds the OpenTelemetry tracer configured by standard OTLP environment variables.
+func OTLPTracer(ctx context.Context) (Tracer, func(context.Context) error, error) {
+	return observe.NewOTLP(ctx)
+}

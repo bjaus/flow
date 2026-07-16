@@ -88,13 +88,17 @@ func TestClaimIsAtomicAcrossCallers(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	ids := make(chan string, 40)
+	errs := make(chan error, 4)
 	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for {
 				r, err := s.Runs.Claim(ctx)
-				require.NoError(t, err)
+				if err != nil {
+					errs <- err
+					return
+				}
 				if r == nil {
 					return
 				}
@@ -104,12 +108,47 @@ func TestClaimIsAtomicAcrossCallers(t *testing.T) {
 	}
 	wg.Wait()
 	close(ids)
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 	seen := map[string]bool{}
 	for id := range ids {
 		require.False(t, seen[id])
 		seen[id] = true
 	}
 	require.Len(t, seen, 20)
+}
+
+func TestEventsFromAnotherStoreInstanceReachLiveSubscriber(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared.db")
+	first, err := app.SQLite(path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, first.Close()) }()
+	second, err := app.SQLite(path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, second.Close()) }()
+	ch, cancel := first.Events.Subscribe("shared")
+	defer cancel()
+	second.Events.Publish(app.Event{RunID: "shared", Kind: app.EventRunStarted})
+	select {
+	case event := <-ch:
+		require.Equal(t, app.EventRunStarted, event.Kind)
+	case <-time.After(time.Second):
+		t.Fatal("cross-instance event was not observed")
+	}
+}
+
+func TestLargeEventHistoryDoesNotBlockSubscription(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 600; i++ {
+		s.Events.Publish(app.Event{RunID: "large", Kind: app.EventAgentToken})
+	}
+	ch, cancel := s.Events.Subscribe("large")
+	defer cancel()
+	for want := int64(1); want <= 600; want++ {
+		require.Equal(t, want, (<-ch).Seq)
+	}
 }
 
 func TestEventsReplayThenLiveWithIndependentSequences(t *testing.T) {

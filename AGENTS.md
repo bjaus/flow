@@ -9,20 +9,19 @@ guessing.
 
 ## Current state — read before touching anything
 
-- The **`flow` DSL** (repo root, `package flow`) and the **`engine`** package (`./engine`) are **built,
-  tested, and ready**. `go test ./...` is green today. Treat them as a finished dependency.
+- The **`flow` DSL**, **`engine`**, and **`app/` runtime** are built and covered by deterministic tests. The
+  runtime includes SQLite durability, the queue worker, HTTP/SSE API, CLI, Markdown registry, gateway/fake
+  providers, OpenTelemetry, Bubble Tea TUI, embedded htmx PWA, safe-redeployment controls, and scaffolder.
 - **Do not modify the DSL or the engine** except where SPEC.md explicitly calls for it. The spec-mandated
   renames (`eino`→`engine`, the compiled type `App`→`Runnable`, and the module path) are already applied.
-- **What remains is the entire `app/` runtime** — the durable server, pluggable stores, model provider,
-  markdown agent/skill registry, terminal UI, CLI client, and htmx web app — plus packaging and the
-  world-class DSL documentation. That is the job.
+- Extend or repair the implemented product against `SPEC.md`; preserve its port seams and zero-token test
+  coverage. `just check` is the source of truth for repository health.
 
 ## Where to start
 
-Work **SPEC.md §16 "Phased execution plan"** strictly in order, beginning at **Phase 0**. Every phase has a
-concrete *Done when* checklist and a *Verify* command. Ship and commit each phase before starting the next.
-Phases 0–7 are all verifiable with the fake provider and **no network**, so build the whole runtime with zero
-tokens before wiring the real model gateway.
+For unfinished or replacement work, follow **SPEC.md §16 "Phased execution plan"** and its verification
+commands. Phases 0–8 have an implementation; changes must keep every earlier phase green. Prefer the fake
+provider and deterministic ports—normal verification spends no model tokens.
 
 ## Module layout (SPEC.md §2)
 
