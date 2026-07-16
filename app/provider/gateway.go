@@ -39,5 +39,17 @@ func (p *GatewayProvider) Model(ctx context.Context, persona core.Persona) (mode
 	if persona.Model == "" {
 		return nil, errors.New("persona model is required")
 	}
-	return openai.NewChatModel(ctx, &openai.ChatModelConfig{APIKey: key, BaseURL: baseURL, Model: persona.Model, Timeout: p.timeout})
+	return openai.NewChatModel(ctx, &openai.ChatModelConfig{
+		APIKey:              key,
+		BaseURL:             baseURL,
+		Model:               persona.Model,
+		Timeout:             p.timeout,
+		Temperature:         persona.Temperature,
+		TopP:                persona.TopP,
+		MaxCompletionTokens: persona.MaxCompletionTokens,
+		Stop:                persona.Stop,
+		PresencePenalty:     persona.PresencePenalty,
+		FrequencyPenalty:    persona.FrequencyPenalty,
+		Seed:                persona.Seed,
+	})
 }

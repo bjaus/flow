@@ -90,15 +90,22 @@ type Event struct {
 }
 
 type Persona struct {
-	Name              string   `json:"name"`
-	Model             string   `json:"model"`
-	FallbackModels    []string `json:"fallback_models,omitempty"`
-	Profile           string   `json:"profile,omitempty"`
-	Roles             []string `json:"roles,omitempty"`
-	Tools             []string `json:"tools,omitempty"`
-	ToolPermissions   []string `json:"tool_permissions,omitempty"`
-	Skills            []string `json:"skills,omitempty"`
-	SystemInstruction string   `json:"system_instruction"`
+	Name                string   `json:"name"`
+	Model               string   `json:"model"`
+	FallbackModels      []string `json:"fallback_models,omitempty"`
+	Profile             string   `json:"profile,omitempty"`
+	Temperature         *float32 `json:"temperature,omitempty"`
+	TopP                *float32 `json:"top_p,omitempty"`
+	MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
+	Stop                []string `json:"stop,omitempty"`
+	PresencePenalty     *float32 `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    *float32 `json:"frequency_penalty,omitempty"`
+	Seed                *int     `json:"seed,omitempty"`
+	Roles               []string `json:"roles,omitempty"`
+	Tools               []string `json:"tools,omitempty"`
+	ToolPermissions     []string `json:"tool_permissions,omitempty"`
+	Skills              []string `json:"skills,omitempty"`
+	SystemInstruction   string   `json:"system_instruction"`
 }
 
 type Attr struct {

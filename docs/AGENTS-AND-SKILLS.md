@@ -34,6 +34,15 @@ profiles:
   coding:
     model: coding-model
     fallbackModels: [strong-model]
+    temperature: 0.2
+    maxCompletionTokens: 1200
+    stop: ["END"]
+  exploratory:
+    models: [creative-model]
+    topP: 0.9
+    presencePenalty: 0.3
+    frequencyPenalty: 0.1
+    seed: 42
 
 vars:
   repo: "./"
@@ -46,8 +55,12 @@ roles:
     allow: ["bash(go test ./...)"] # `allow` is accepted as a tools alias
 ```
 
-A profile is an ordered model ladder. Roles bundle tool grants and skill names. Variables substitute into
-grants. Keep secrets out of YAML; provider credentials come from environment variables.
+A profile is an ordered model ladder and can set generation defaults for every persona using it. `temperature`
+(0–2), `topP` (0–1), `maxCompletionTokens` (positive), `stop`, `presencePenalty` (-2–2),
+`frequencyPenalty` (-2–2), and `seed` are passed to the OpenAI-compatible provider. Omit a setting to
+preserve the provider's default; an explicit `temperature: 0` is honored. Usually set either `temperature`
+or `topP`, not both. Roles bundle tool grants and skill names. Variables substitute into grants. Keep secrets
+out of YAML; provider credentials come from environment variables.
 
 ## Persona files
 

@@ -121,8 +121,10 @@ func (l *Loader) Reload() error {
 				grants[i] = expanded
 			}
 			models := []string(nil)
+			var profile Profile
 			if meta.Profile != "" {
-				profile, ok := sources.Profiles[meta.Profile]
+				var ok bool
+				profile, ok = sources.Profiles[meta.Profile]
 				if !ok {
 					return fmt.Errorf("%s: profile %q not found", path, meta.Profile)
 				}
@@ -146,7 +148,7 @@ func (l *Loader) Reload() error {
 			if parseErr != nil {
 				return fmt.Errorf("%s: %w", path, parseErr)
 			}
-			personas[meta.Name] = core.Persona{Name: meta.Name, Model: models[0], FallbackModels: append([]string(nil), models[1:]...), Tools: toolNames, ToolPermissions: unique(grants), Skills: unique(skillNames), Roles: unique(meta.Roles), Profile: meta.Profile, SystemInstruction: instruction}
+			personas[meta.Name] = core.Persona{Name: meta.Name, Model: models[0], FallbackModels: append([]string(nil), models[1:]...), Temperature: profile.Temperature, TopP: profile.TopP, MaxCompletionTokens: profile.MaxCompletionTokens, Stop: append([]string(nil), profile.Stop...), PresencePenalty: profile.PresencePenalty, FrequencyPenalty: profile.FrequencyPenalty, Seed: profile.Seed, Tools: toolNames, ToolPermissions: unique(grants), Skills: unique(skillNames), Roles: unique(meta.Roles), Profile: meta.Profile, SystemInstruction: instruction}
 			return nil
 		})
 		if err != nil {

@@ -11,9 +11,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Profile names an ordered model ladder. The first model is preferred and the rest are fallbacks.
+// Profile names an ordered model ladder and its generation settings. The first model is preferred and the rest are fallbacks.
+// Pointer settings preserve the provider default when omitted, while permitting explicit zero values.
 type Profile struct {
-	Models []string
+	Models              []string
+	Temperature         *float32 `yaml:"temperature"`
+	TopP                *float32 `yaml:"topP"`
+	MaxCompletionTokens *int     `yaml:"maxCompletionTokens"`
+	Stop                []string `yaml:"stop"`
+	PresencePenalty     *float32 `yaml:"presencePenalty"`
+	FrequencyPenalty    *float32 `yaml:"frequencyPenalty"`
+	Seed                *int     `yaml:"seed"`
 }
 
 func (p *Profile) UnmarshalYAML(node *yaml.Node) error {
@@ -34,9 +42,16 @@ func (p *Profile) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	var value struct {
-		Models         []string `yaml:"models"`
-		Model          string   `yaml:"model"`
-		FallbackModels []string `yaml:"fallbackModels"`
+		Models              []string `yaml:"models"`
+		Model               string   `yaml:"model"`
+		FallbackModels      []string `yaml:"fallbackModels"`
+		Temperature         *float32 `yaml:"temperature"`
+		TopP                *float32 `yaml:"topP"`
+		MaxCompletionTokens *int     `yaml:"maxCompletionTokens"`
+		Stop                []string `yaml:"stop"`
+		PresencePenalty     *float32 `yaml:"presencePenalty"`
+		FrequencyPenalty    *float32 `yaml:"frequencyPenalty"`
+		Seed                *int     `yaml:"seed"`
 	}
 	if err := node.Decode(&value); err != nil {
 		return err
@@ -44,6 +59,32 @@ func (p *Profile) UnmarshalYAML(node *yaml.Node) error {
 	p.Models = append([]string(nil), value.Models...)
 	if value.Model != "" {
 		p.Models = append([]string{value.Model}, value.FallbackModels...)
+	}
+	p.Temperature = value.Temperature
+	p.TopP = value.TopP
+	p.MaxCompletionTokens = value.MaxCompletionTokens
+	p.Stop = append([]string(nil), value.Stop...)
+	p.PresencePenalty = value.PresencePenalty
+	p.FrequencyPenalty = value.FrequencyPenalty
+	p.Seed = value.Seed
+	return p.validate()
+}
+
+func (p Profile) validate() error {
+	if p.Temperature != nil && (*p.Temperature < 0 || *p.Temperature > 2) {
+		return fmt.Errorf("temperature must be between 0 and 2")
+	}
+	if p.TopP != nil && (*p.TopP < 0 || *p.TopP > 1) {
+		return fmt.Errorf("topP must be between 0 and 1")
+	}
+	if p.MaxCompletionTokens != nil && *p.MaxCompletionTokens <= 0 {
+		return fmt.Errorf("maxCompletionTokens must be greater than zero")
+	}
+	if p.PresencePenalty != nil && (*p.PresencePenalty < -2 || *p.PresencePenalty > 2) {
+		return fmt.Errorf("presencePenalty must be between -2 and 2")
+	}
+	if p.FrequencyPenalty != nil && (*p.FrequencyPenalty < -2 || *p.FrequencyPenalty > 2) {
+		return fmt.Errorf("frequencyPenalty must be between -2 and 2")
 	}
 	return nil
 }
