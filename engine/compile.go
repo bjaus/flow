@@ -300,8 +300,12 @@ func (c *compiler) lowerHuman(n *ir.Node) (string, string, error) {
 	apply, render := n.Apply, n.Render
 	err := c.g.AddLambdaNode(key, compose.InvokableLambda(func(ctx context.Context, in any) (any, error) {
 		if was, has, saved := compose.GetInterruptState[any](ctx); was && has {
-			_, _, dec := compose.GetResumeContext[flow.Decision](ctx)
-			return apply(saved, dec), nil
+			// Only the resume target applies the decision. A sibling gate suspended in the same
+			// super-step re-interrupts with its saved input instead of consuming a zero decision.
+			if resumed, _, dec := compose.GetResumeContext[flow.Decision](ctx); resumed {
+				return apply(saved, dec), nil
+			}
+			return nil, compose.StatefulInterrupt(ctx, render(saved), saved)
 		}
 		return nil, compose.StatefulInterrupt(ctx, render(in), in)
 	}), compose.WithNodeName(n.Name))
@@ -583,7 +587,11 @@ func (c *compiler) lowerRouter(n *ir.Node) (string, string, error) {
 		if was, has, saved := compose.GetInterruptState[any](ctx); was && has {
 			cur = saved
 			if h, ok := humans[sel(cur)]; ok {
-				_, _, dec := compose.GetResumeContext[flow.Decision](ctx)
+				resumed, _, dec := compose.GetResumeContext[flow.Decision](ctx)
+				if !resumed {
+					// Another gate in the graph was resumed, not this one: keep waiting.
+					return nil, compose.StatefulInterrupt(ctx, h.Render(cur), cur)
+				}
 				cur = h.Apply(cur, dec)
 			}
 		}

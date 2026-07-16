@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -91,5 +92,58 @@ func TestDurableHumanInParallel(t *testing.T) {
 	}
 	if out != "a:x|b:x:ok" {
 		t.Fatalf("durable human in a parallel branch wrong: %q", out)
+	}
+}
+
+// Two sibling gates suspended in the same super-step must each receive their own decision; the
+// non-target gate re-interrupts instead of consuming a zero-value decision.
+func TestDurableSiblingHumansGetOwnDecisions(t *testing.T) {
+	gate := func(name string) flow.Step[string, string] {
+		return flow.Human(name,
+			func(v string, d flow.Decision) string {
+				if d.Approved {
+					return v + ":yes"
+				}
+				return v + ":no:" + d.Feedback
+			},
+			func(v string) string { return "gate " + name + " for " + v })
+	}
+	panel := flow.Reduce(flow.Parallel(gate("left"), gate("right")), func(rs []string) string {
+		sort.Strings(rs)
+		return strings.Join(rs, "|")
+	})
+	wf := flow.Define("siblinghumans", "", panel)
+
+	app, err := engine.Compile(context.Background(), wf, registry(nil), &memStore{m: map[string][]byte{}})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	ctx := context.Background()
+	const cp = "sib-1"
+	_, err = app.Invoke(ctx, "x", compose.WithCheckPointID(cp))
+
+	decisions := map[string]flow.Decision{
+		"gate left for x":  {Approved: true},
+		"gate right for x": {Approved: false, Feedback: "redo"},
+	}
+	var out string
+	for range 3 {
+		info, paused := compose.ExtractInterruptInfo(err)
+		if !paused {
+			break
+		}
+		ic := info.InterruptContexts[0]
+		dec, ok := decisions[fmt.Sprint(ic.Info)]
+		if !ok {
+			t.Fatalf("unexpected gate prompt %q", fmt.Sprint(ic.Info))
+		}
+		rctx := compose.ResumeWithData(ctx, ic.ID, dec)
+		out, err = app.Invoke(rctx, "x", compose.WithCheckPointID(cp))
+	}
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if out != "x:no:redo|x:yes" {
+		t.Fatalf("decisions crossed between sibling gates: %q", out)
 	}
 }
