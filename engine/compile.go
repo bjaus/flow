@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -382,8 +384,11 @@ func (c *compiler) lowerRoute(n *ir.Node) (string, string, error) {
 		targets[ce] = true
 		return c.g.AddEdge(cx, join)
 	}
-	for k, cn := range n.Cases {
-		if err := lowerCase(k, cn); err != nil {
+	// Sorted order: ranging over the cases map directly would hand out c.fresh node keys in a different
+	// order on each compile, so a checkpoint taken inside a case could not be restored by a recompiled
+	// graph (the app worker recompiles per claim).
+	for _, k := range slices.Sorted(maps.Keys(n.Cases)) {
+		if err := lowerCase(k, n.Cases[k]); err != nil {
 			return "", "", err
 		}
 	}
@@ -546,8 +551,9 @@ func (c *compiler) lowerBind(n *ir.Node) (string, string, error) {
 		if was, has, saved := compose.GetInterruptState[any](ctx); was && has {
 			s = saved
 		}
-		sctx := compose.AppendAddressSegment(ctx, addrFanOut, "bind")
-		out, err := inner.Invoke(sctx, read(s), compose.WithCheckPointID(key+"/bind"))
+		id := scopedCheckpointID(ctx, key+"/bind")
+		sctx := WithCheckpointScope(compose.AppendAddressSegment(ctx, addrFanOut, "bind"), id)
+		out, err := inner.Invoke(sctx, read(s), compose.WithCheckPointID(id))
 		if err != nil {
 			if isInterrupt(err) {
 				return nil, compose.CompositeInterrupt(ctx, nil, s, err)
@@ -567,7 +573,8 @@ func (c *compiler) lowerBind(n *ir.Node) (string, string, error) {
 func (c *compiler) lowerRouter(n *ir.Node) (string, string, error) {
 	subs := map[string]compose.Runnable[any, any]{}
 	humans := map[string]*ir.Node{}
-	for k, cn := range n.Cases {
+	for _, k := range slices.Sorted(maps.Keys(n.Cases)) { // sorted so compiles are deterministic
+		cn := n.Cases[k]
 		if cn.Kind == ir.KHuman {
 			humans[k] = cn
 			continue
@@ -612,8 +619,9 @@ func (c *compiler) lowerRouter(n *ir.Node) (string, string, error) {
 			var next any
 			var err error
 			if durable {
-				sctx := compose.AppendAddressSegment(ctx, addrFanOut, who)
-				next, err = streamToValue(sctx, r, cur, compose.WithCheckPointID(key+"/"+who))
+				id := scopedCheckpointID(ctx, key+"/"+who)
+				sctx := WithCheckpointScope(compose.AppendAddressSegment(ctx, addrFanOut, who), id)
+				next, err = streamToValue(sctx, r, cur, compose.WithCheckPointID(id))
 			} else {
 				next, err = streamToValue(ctx, r, cur)
 			}
@@ -636,6 +644,28 @@ func (c *compiler) lowerRouter(n *ir.Node) (string, string, error) {
 // addrFanOut is the address-segment type flow gives each fan-out branch (and each bind/dispatch sub-run), so
 // eino can route a resume decision to the exact branch that paused.
 const addrFanOut compose.AddressSegmentType = "flow_fanout"
+
+// checkpointScopeKey carries the ambient checkpoint scope through a run: the run's top-level checkpoint id
+// plus the id of every enclosing sub-run. Node keys are deterministic per definition, so without this scope
+// two RUNS of the same workflow would write their nested sub-run checkpoints (fan-out branches, bind and
+// dispatch participants) under identical ids and restore each other's state.
+type checkpointScopeKey struct{}
+
+// WithCheckpointScope namespaces every durable sub-run checkpoint id under scope. A runtime that drives one
+// compiled definition for many runs passes its per-run checkpoint id here (the same id it hands to eino via
+// compose.WithCheckPointID), so concurrent or successive runs never collide on a sub-checkpoint.
+func WithCheckpointScope(ctx context.Context, scope string) context.Context {
+	return context.WithValue(ctx, checkpointScopeKey{}, scope)
+}
+
+// scopedCheckpointID qualifies a sub-run checkpoint id with the ambient scope (no-op when none is set, which
+// keeps single-run embedded usage unchanged).
+func scopedCheckpointID(ctx context.Context, id string) string {
+	if s, ok := ctx.Value(checkpointScopeKey{}).(string); ok && s != "" {
+		return s + "/" + id
+	}
+	return id
+}
 
 // fanState is a fan-out node's durable state: the branch inputs (restored on resume, since edge values are
 // not), the results already completed, and the branch indices still interrupted. Registered for checkpointing
@@ -684,8 +714,9 @@ func durableFanOut(ctx context.Context, seg string, durable bool, sub func(i int
 			// when a store is configured; passing a checkpoint id without one is an error.
 			sctx, opts := ctx, []compose.Option(nil)
 			if durable {
-				sctx = compose.AppendAddressSegment(ctx, addrFanOut, strconv.Itoa(i))
-				opts = []compose.Option{compose.WithCheckPointID(seg + "/" + strconv.Itoa(i))}
+				id := scopedCheckpointID(ctx, seg+"/"+strconv.Itoa(i))
+				sctx = WithCheckpointScope(compose.AppendAddressSegment(ctx, addrFanOut, strconv.Itoa(i)), id)
+				opts = []compose.Option{compose.WithCheckPointID(id)}
 			}
 			out, err := streamToValue(sctx, sub(i), inputs[i], opts...)
 			ch <- res{i: i, out: out, err: err}

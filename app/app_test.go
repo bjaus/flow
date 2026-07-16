@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bjaus/flow"
+	"github.com/bjaus/flow/engine"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -242,6 +243,71 @@ func TestHumanInterruptDecisionAndDurableResume(t *testing.T) {
 	run := waitRun(t, s, id, StatusSucceeded)
 	require.JSONEq(t, `{"text":"draft","approved":true,"feedback":"ship"}`, string(run.Result))
 }
+
+// waitGate waits until the run pauses at a gate whose prompt has not been decided yet.
+func waitGate(t *testing.T, s *Stores, id string, seen map[string]bool) *Run {
+	t.Helper()
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		r, err := s.Runs.Get(context.Background(), id)
+		require.NoError(t, err)
+		if r.Status == StatusFailed {
+			t.Fatalf("run failed while waiting for a gate: %s", r.Error)
+		}
+		if r.Status == StatusAwaitingReview && !seen[r.GatePrompt] {
+			return r
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r, err := s.Runs.Get(context.Background(), id)
+	require.NoError(t, err)
+	t.Fatalf("no fresh gate reached; run is %s (gate %q, err %q)", r.Status, r.GatePrompt, r.Error)
+	return nil
+}
+
+type batchState struct {
+	Items   []string `json:"items"`
+	Results []string `json:"results"`
+}
+
+// Regression: two Human gates nested in a flow.Map inside a flow.Bind, driven one decision at a
+// time through the daemon worker (which recompiles the graph on every claim), must both resume durably.
+// The enclosing Route mirrors the failing daemon workflow: its cases live in a Go map, so lowering them in
+// iteration order made node keys differ between compiles and checkpoint restore failed on resume.
+func TestMapNestedHumanGatesResumeThroughWorker(t *testing.T) {
+	engine.Register[batchState]()
+	pass := func(name string) flow.Step[batchState, batchState] {
+		return flow.Do(name, func(_ context.Context, s batchState) (batchState, error) { return s, nil })
+	}
+	gate := flow.Human("approve-item",
+		func(v string, d flow.Decision) string { return v + ":" + d.Feedback },
+		func(v string) string { return "approve " + v })
+	review := flow.Bind(flow.Map(gate),
+		func(s batchState) []string { return s.Items },
+		func(s batchState, outs []string) batchState { s.Results = outs; return s })
+	route := flow.Route(func(batchState) string { return "review" }, map[string]flow.Step[batchState, batchState]{
+		"a": pass("case-a"), "b": pass("case-b"), "review": review, "d": pass("case-d"), "e": pass("case-e"),
+	})
+	wf := flow.Define("batch-review", "map-nested human gates", route)
+	a, s := testApp(t, FakeProvider(nil))
+	require.NoError(t, a.Register(wf))
+	serve(t, a)
+	id, err := a.Trigger(context.Background(), "batch-review", json.RawMessage(`{"items":["a","b"]}`))
+	require.NoError(t, err)
+
+	feedback := map[string]string{"approve a": "alpha", "approve b": "beta"}
+	seen := map[string]bool{}
+	for range 2 {
+		run := waitGate(t, s, id, seen)
+		fb, ok := feedback[run.GatePrompt]
+		require.True(t, ok, "unexpected gate prompt %q", run.GatePrompt)
+		seen[run.GatePrompt] = true
+		require.NoError(t, a.Decide(context.Background(), id, Decision{Approved: true, Feedback: fb}))
+	}
+	run := waitRun(t, s, id, StatusSucceeded)
+	require.JSONEq(t, `{"items":["a","b"],"results":["a:alpha","b:beta"]}`, string(run.Result))
+}
+
 func TestProcessBoundaryRecoveryAndFingerprintMismatch(t *testing.T) {
 	stores, err := SQLite(filepath.Join(t.TempDir(), "flow.db"))
 	require.NoError(t, err)

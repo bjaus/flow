@@ -153,7 +153,7 @@ func TestNativeStreamingAndDurableHuman(t *testing.T) {
 	sink := newSink()
 
 	// Stream: the planner streams its tokens to the sink, then the run pauses at the human gate.
-	sr, err := app.Stream(ctx, "JH-56", compose.WithCheckPointID(cp), compose.WithCallbacks(sink))
+	sr, err := app.Stream(ctx, "TCK-56", compose.WithCheckPointID(cp), compose.WithCallbacks(sink))
 	if err == nil {
 		// drain until the interrupt surfaces from the stream
 		for {
@@ -175,7 +175,7 @@ func TestNativeStreamingAndDurableHuman(t *testing.T) {
 
 	// PROVE durability: resume with approval; the run continues natively to completion.
 	rctx := compose.ResumeWithData(ctx, interruptID(t, err), flow.Decision{Approved: true})
-	out, err := app.Invoke(rctx, "JH-56", compose.WithCheckPointID(cp))
+	out, err := app.Invoke(rctx, "TCK-56", compose.WithCheckPointID(cp))
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}

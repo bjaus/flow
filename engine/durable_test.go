@@ -147,3 +147,116 @@ func TestDurableSiblingHumansGetOwnDecisions(t *testing.T) {
 		t.Fatalf("decisions crossed between sibling gates: %q", out)
 	}
 }
+
+// routedBatch is the state the recompile/isolation tests thread through Map-nested gates.
+type routedBatch struct {
+	Items   []string
+	Results []string
+}
+
+// itemGate approves one item with the operator's feedback attached.
+func itemGate() flow.Step[string, string] {
+	return flow.Human("item",
+		func(v string, d flow.Decision) string { return v + ":" + d.Feedback },
+		func(v string) string { return "approve " + v })
+}
+
+// reviewEach binds Map(Human) into the batch state: every item is its own gate.
+func reviewEach() flow.Step[routedBatch, routedBatch] {
+	return flow.Bind(flow.Map(itemGate()),
+		func(s routedBatch) []string { return s.Items },
+		func(s routedBatch, outs []string) routedBatch { s.Results = outs; return s })
+}
+
+// driveGates resumes a suspended run one prompt-matched decision at a time until it completes.
+func driveGates(t *testing.T, invoke func(context.Context) (routedBatch, error), err error, decisions map[string]flow.Decision) routedBatch {
+	t.Helper()
+	ctx := context.Background()
+	var out routedBatch
+	for range len(decisions) + 1 {
+		info, paused := compose.ExtractInterruptInfo(err)
+		if !paused {
+			break
+		}
+		ic := info.InterruptContexts[0]
+		dec, ok := decisions[fmt.Sprint(ic.Info)]
+		if !ok {
+			t.Fatalf("unexpected gate prompt %q", fmt.Sprint(ic.Info))
+		}
+		out, err = invoke(compose.ResumeWithData(ctx, ic.ID, dec))
+	}
+	if err != nil {
+		t.Fatalf("drive gates: %v", err)
+	}
+	return out
+}
+
+// Daemon-shaped durability: the app worker recompiles the definition on every claim, so a checkpoint
+// taken by one compiled instance must restore into a FRESHLY compiled one — including gates nested inside a
+// Route case. Route cases live in a Go map; lowering them in raw iteration order handed out different node
+// keys per compile, so restore failed with "channel[...] from checkpoint is not registered".
+func TestDurableResumeAcrossRecompiles(t *testing.T) {
+	pass := func(name string) flow.Step[routedBatch, routedBatch] {
+		return flow.Do(name, func(_ context.Context, s routedBatch) (routedBatch, error) { return s, nil })
+	}
+	wf := flow.Define("routedbatch", "", flow.Route(func(routedBatch) string { return "review" },
+		map[string]flow.Step[routedBatch, routedBatch]{
+			"a": pass("case-a"), "b": pass("case-b"), "review": reviewEach(), "d": pass("case-d"), "e": pass("case-e"),
+		}))
+
+	store := &memStore{m: map[string][]byte{}}
+	const cp = "recompile-1"
+	in := routedBatch{Items: []string{"a", "b"}}
+	invoke := func(ctx context.Context) (routedBatch, error) { // a fresh compile per invocation, like the worker
+		app, err := engine.Compile(context.Background(), wf, registry(nil), store)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		return app.Invoke(ctx, in, compose.WithCheckPointID(cp))
+	}
+	_, err := invoke(context.Background())
+	out := driveGates(t, invoke, err, map[string]flow.Decision{
+		"approve a": {Approved: true, Feedback: "alpha"},
+		"approve b": {Approved: true, Feedback: "beta"},
+	})
+	if got := strings.Join(out.Results, "|"); got != "a:alpha|b:beta" {
+		t.Fatalf("resume across recompiles produced wrong results: %q", got)
+	}
+}
+
+// Two concurrent RUNS of the same workflow suspended at Map-nested gates must not share fan-out sub-run
+// checkpoints: node keys are deterministic per definition, so without a per-run scope both runs would write
+// their bind/map sub-checkpoints under identical ids and restore each other's state.
+func TestConcurrentRunsIsolateFanOutSubCheckpoints(t *testing.T) {
+	wf := flow.Define("scopedbatch", "", reviewEach())
+	app, err := engine.Compile(context.Background(), wf, registry(nil), &memStore{m: map[string][]byte{}})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	invoke := func(cp string, in routedBatch) func(context.Context) (routedBatch, error) {
+		return func(ctx context.Context) (routedBatch, error) {
+			return app.Invoke(engine.WithCheckpointScope(ctx, cp), in, compose.WithCheckPointID(cp))
+		}
+	}
+	inA, inB := routedBatch{Items: []string{"a1", "a2"}}, routedBatch{Items: []string{"b1", "b2"}}
+	invokeA, invokeB := invoke("run-A", inA), invoke("run-B", inB)
+
+	// Suspend BOTH runs before resuming either, so their sub-run checkpoints coexist in the store.
+	_, errA := invokeA(context.Background())
+	_, errB := invokeB(context.Background())
+
+	outA := driveGates(t, invokeA, errA, map[string]flow.Decision{
+		"approve a1": {Approved: true, Feedback: "a-one"},
+		"approve a2": {Approved: true, Feedback: "a-two"},
+	})
+	outB := driveGates(t, invokeB, errB, map[string]flow.Decision{
+		"approve b1": {Approved: true, Feedback: "b-one"},
+		"approve b2": {Approved: true, Feedback: "b-two"},
+	})
+	if got := strings.Join(outA.Results, "|"); got != "a1:a-one|a2:a-two" {
+		t.Fatalf("run A results crossed with run B: %q", got)
+	}
+	if got := strings.Join(outB.Results, "|"); got != "b1:b-one|b2:b-two" {
+		t.Fatalf("run B results crossed with run A: %q", got)
+	}
+}

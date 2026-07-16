@@ -72,7 +72,7 @@ func TestDurableStructHumanGate(t *testing.T) {
 	}
 	ctx := context.Background()
 	const cp = "t-1"
-	in := Ticket{ID: "JH-9"}
+	in := Ticket{ID: "TCK-9"}
 
 	_, err = app.Invoke(ctx, in, compose.WithCheckPointID(cp))
 	if _, paused := compose.ExtractInterruptInfo(err); !paused {

@@ -664,6 +664,9 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 	a.events.Publish(Event{RunID: run.ID, Kind: EventRunStarted})
 	cb := &eventCallbacks{runID: run.ID, events: a.events, tracer: a.tracer, runs: a.runs, cancel: cancelRun, draining: &a.draining}
 	opts := []compose.Option{compose.WithCheckPointID(run.ID), compose.WithCallbacks(cb)}
+	// Namespace nested sub-run checkpoints (fan-out branches, bind/dispatch participants) under this run's
+	// id, so two runs of the same workflow suspended at the same gate never share a sub-checkpoint.
+	runCtx = engine.WithCheckpointScope(runCtx, run.ID)
 	if run.Decision != nil && run.InterruptID != "" {
 		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, flow.Decision{Approved: run.Decision.Approved, Feedback: run.Decision.Feedback})
 		run.Decision = nil
