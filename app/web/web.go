@@ -24,6 +24,8 @@ type Service interface {
 	GetRun(context.Context, string) (*core.Run, error)
 	Decide(context.Context, string, core.Decision) error
 	Migrate(context.Context, string, string) error
+	ConfigStatus() core.ConfigStatus
+	ReloadConfig(context.Context) error
 	EventSink() core.EventSink
 }
 
@@ -66,6 +68,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.trigger(w, r)
 	case r.Method == http.MethodGet && path == "/ui/events":
 		h.events(w, r)
+	case r.Method == http.MethodPost && path == "/ui/config/reload":
+		if err := h.service.ReloadConfig(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = fmt.Fprint(w, `<span class="notice">Configuration reloaded.</span>`)
 	case strings.HasPrefix(path, "/ui/runs/"):
 		h.run(w, r, strings.TrimPrefix(path, "/ui/runs/"))
 	default:
@@ -76,7 +84,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) shell(w http.ResponseWriter, r *http.Request) {
 	runs, _ := h.service.ListRuns(r.Context(), core.RunFilter{})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.tmpl.ExecuteTemplate(w, "shell", map[string]any{"Runs": runs, "Workflows": h.service.RegisteredWebWorkflows()}); err != nil {
+	if err := h.tmpl.ExecuteTemplate(w, "shell", map[string]any{"Runs": runs, "Workflows": h.service.RegisteredWebWorkflows(), "Config": h.service.ConfigStatus()}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

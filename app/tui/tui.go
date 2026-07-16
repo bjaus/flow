@@ -28,16 +28,18 @@ type Client struct {
 type eventMsg core.Event
 type runsMsg []*core.Run
 type errMsg error
+type configMsg core.ConfigStatus
 
 type Model struct {
-	client     *Client
-	runs       []*core.Run
-	selected   int
-	pipeline   []string
-	transcript string
-	err        error
-	width      int
-	filter     core.Status
+	client      *Client
+	runs        []*core.Run
+	selected    int
+	pipeline    []string
+	transcript  string
+	err         error
+	width       int
+	filter      core.Status
+	configDirty bool
 }
 
 func New(endpoint string) Model {
@@ -52,7 +54,22 @@ func Run(ctx context.Context, endpoint string) error {
 	return err
 }
 
-func (m Model) Init() tea.Cmd { return tea.Batch(m.loadRuns(), m.nextEvent()) }
+func (m Model) Init() tea.Cmd { return tea.Batch(m.loadRuns(), m.loadConfig(), m.nextEvent()) }
+func (m Model) loadConfig() tea.Cmd {
+	return func() tea.Msg {
+		req, _ := http.NewRequestWithContext(m.client.ctx, http.MethodGet, m.client.Endpoint+"/api/config", nil)
+		resp, err := m.client.HTTP.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var status core.ConfigStatus
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			return errMsg(err)
+		}
+		return configMsg(status)
+	}
+}
 func (m Model) loadRuns() tea.Cmd {
 	return func() tea.Msg {
 		req, _ := http.NewRequestWithContext(m.client.ctx, http.MethodGet, m.client.Endpoint+"/api/runs", nil)
@@ -135,9 +152,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.migration("abandon")
 		case "3":
 			return m, m.migration("finish_on_previous")
+		case "c":
+			return m, m.reloadConfig()
 		}
 	case tea.WindowSizeMsg:
 		m.width = v.Width
+	case configMsg:
+		m.configDirty = core.ConfigStatus(v).Dirty
 	case runsMsg:
 		m.runs = v
 		sort.SliceStable(m.runs, func(i, j int) bool {
@@ -151,6 +172,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch e.Kind {
 		case core.EventStepStarted, core.EventStepFinished:
 			m.pipeline = append(m.pipeline, fmt.Sprintf("%s  %s", e.Kind, e.Data))
+		case core.EventConfigChanged:
+			m.configDirty = true
+		case core.EventConfigReloaded:
+			m.configDirty = false
 		case core.EventAgentToken:
 			var d struct {
 				Delta string `json:"delta"`
@@ -166,6 +191,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(time.Second, func(time.Time) tea.Msg { return runsMsg(m.runs) })
 	}
 	return m, nil
+}
+func (m Model) reloadConfig() tea.Cmd {
+	return func() tea.Msg {
+		req, _ := http.NewRequestWithContext(m.client.ctx, http.MethodPost, m.client.Endpoint+"/api/config/reload", nil)
+		resp, err := m.client.HTTP.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode >= 300 {
+			return errMsg(fmt.Errorf("config reload: %s", resp.Status))
+		}
+		var status core.ConfigStatus
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			return errMsg(err)
+		}
+		return configMsg(status)
+	}
 }
 func (m Model) migration(action string) tea.Cmd {
 	return func() tea.Msg {
@@ -212,7 +255,11 @@ var selected = lipgloss.NewStyle().Background(lipgloss.Color("24")).Bold(true)
 
 func (m Model) View() string {
 	var b strings.Builder
-	b.WriteString(title.Render("flow") + "  " + muted.Render("durable workflow console") + "\n\n")
+	b.WriteString(title.Render("flow") + "  " + muted.Render("durable workflow console") + "\n")
+	if m.configDirty {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("Configuration changed; press c to reload.") + "\n")
+	}
+	b.WriteString("\n")
 	runsTitle := "Runs"
 	if m.filter != "" {
 		runsTitle += " · " + string(m.filter)
@@ -255,7 +302,7 @@ func (m Model) View() string {
 	if m.err != nil {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err.Error()))
 	}
-	b.WriteString("\n" + muted.Render("↑/↓ select • f filter • q quit"))
+	b.WriteString("\n" + muted.Render("↑/↓ select • f filter • c reload config • q quit"))
 	return b.String()
 }
 func statusRank(status core.Status) int {

@@ -1,0 +1,5 @@
+profiles:
+  local: [local]
+roles:
+  reviewer:
+    skills: [review]

@@ -49,7 +49,7 @@ func TestLoaderRejectsMalformedDuplicateAndMissingSkill(t *testing.T) {
 		})
 	}
 }
-func TestWatchHotReloadsOnNextInvocation(t *testing.T) {
+func TestWatchDetectsChangesAndReloadsOnlyWhenRequested(t *testing.T) {
 	root := t.TempDir()
 	agents := filepath.Join(root, "agents")
 	skills := filepath.Join(root, "skills")
@@ -63,10 +63,15 @@ func TestWatchHotReloadsOnNextInvocation(t *testing.T) {
 	go func() { done <- loader.Watch(ctx) }()
 	time.Sleep(30 * time.Millisecond)
 	write(t, path, "---\nname: a\nmodel: two\n---\nSecond")
-	require.Eventually(t, func() bool {
-		p, ok := loader.Persona("a")
-		return ok && p.Model == "two" && p.SystemInstruction == "Second"
-	}, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return loader.Status().Dirty }, time.Second, 10*time.Millisecond)
+	p, ok := loader.Persona("a")
+	require.True(t, ok)
+	require.Equal(t, "one", p.Model)
+	require.NoError(t, loader.Reload())
+	p, ok = loader.Persona("a")
+	require.True(t, ok)
+	require.Equal(t, "two", p.Model)
+	require.Equal(t, "Second", p.SystemInstruction)
 	cancel()
 	require.NoError(t, <-done)
 }

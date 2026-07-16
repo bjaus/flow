@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -110,6 +111,56 @@ type staticRegistry map[string]Persona
 func (r staticRegistry) Persona(name string) (Persona, bool) { p, ok := r[name]; return p, ok }
 
 type toolProvider struct{}
+
+type recordingFallbackProvider struct {
+	mu     sync.Mutex
+	models []string
+}
+
+func (p *recordingFallbackProvider) Model(_ context.Context, persona Persona) (model.BaseChatModel, error) {
+	p.mu.Lock()
+	p.models = append(p.models, persona.Model)
+	p.mu.Unlock()
+	return namedResultModel{name: persona.Model}, nil
+}
+
+type namedResultModel struct{ name string }
+
+func (m namedResultModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	if m.name == "primary" {
+		return nil, errors.New("primary unavailable")
+	}
+	return schema.AssistantMessage(`{"text":"fallback"}`, nil), nil
+}
+func (m namedResultModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	out, err := m.Generate(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+	r, w := schema.Pipe[*schema.Message](1)
+	w.Send(out, nil)
+	w.Close()
+	return r, nil
+}
+
+func TestRuntimeUsesProfileFallbackModels(t *testing.T) {
+	stores, err := SQLite(filepath.Join(t.TempDir(), "fallback.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, stores.Close()) })
+	provider := &recordingFallbackProvider{}
+	registry := staticRegistry{"worker": {Name: "worker", Model: "primary", FallbackModels: []string{"secondary"}}}
+	a, err := New(Config{Store: stores, Provider: provider, AgentRegistry: registry, Listen: "127.0.0.1:0"})
+	require.NoError(t, err)
+	type answer struct {
+		Text string `json:"text"`
+	}
+	require.NoError(t, a.Register(flow.Define("fallback", "fallback", flow.Agent[string, answer]("worker", func(in string) string { return in }))))
+	serve(t, a)
+	id, err := a.Trigger(context.Background(), "fallback", json.RawMessage(`"go"`))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"text":"fallback"}`, string(waitRun(t, stores, id, StatusSucceeded).Result))
+	require.Equal(t, []string{"primary", "secondary"}, provider.models)
+}
 
 func (toolProvider) Model(context.Context, Persona) (model.BaseChatModel, error) {
 	return appToolModel{}, nil

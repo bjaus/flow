@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bjaus/flow"
+	"github.com/bjaus/flow/app/agent"
 	"github.com/bjaus/flow/app/server"
 	"github.com/bjaus/flow/app/tui"
 	"github.com/bjaus/flow/app/web"
@@ -46,8 +46,9 @@ type Config struct {
 	Provider      Provider
 	AgentRegistry AgentRegistry
 	Tracer        Tracer
-	Agents        string
-	Skills        string
+	Agents        []string
+	Skills        []string
+	ConfigFiles   []string
 	Listen        string
 	DrainTimeout  time.Duration
 	DrainOnly     bool
@@ -68,6 +69,14 @@ type registeredWorkflow struct {
 	agents     []string
 }
 
+type reloadableRegistry interface {
+	AgentRegistry
+	Reload() error
+	Watch(context.Context) error
+	Status() ConfigStatus
+	SetOnChange(func(ConfigStatus))
+}
+
 type App struct {
 	cfg        Config
 	checkpoint CheckpointStore
@@ -86,7 +95,7 @@ type App struct {
 
 // New constructs a runtime, applying local defaults for omitted ports.
 func New(cfg Config) (*App, error) {
-	agentPathsExplicit := cfg.Agents != "" || cfg.Skills != ""
+	agentPathsExplicit := len(cfg.Agents) > 0 || len(cfg.Skills) > 0 || len(cfg.ConfigFiles) > 0
 	owned := false
 	if cfg.Store == nil && (cfg.Checkpoint == nil || cfg.RunStore == nil || cfg.Events == nil) {
 		s, err := SQLite("flow.db")
@@ -118,23 +127,24 @@ func New(cfg Config) (*App, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":7788"
 	}
-	if cfg.Agents == "" {
-		cfg.Agents = "./agents"
-	}
-	if cfg.Skills == "" {
-		cfg.Skills = "./skills"
-	}
 	if cfg.AgentRegistry == nil {
-		_, agentsErr := os.Stat(cfg.Agents)
-		_, skillsErr := os.Stat(cfg.Skills)
-		if agentPathsExplicit || (agentsErr == nil && skillsErr == nil) {
-			loader, err := MarkdownRegistry(cfg.Agents, cfg.Skills)
-			if err != nil {
-				if owned {
-					_ = cfg.Store.Close()
-				}
-				return nil, fmt.Errorf("agent registry: %w", err)
+		var loader interface {
+			AgentRegistry
+			Empty() bool
+		}
+		var err error
+		if len(cfg.Agents) > 0 || len(cfg.Skills) > 0 {
+			loader, err = MarkdownRegistry(cfg.Agents, cfg.Skills)
+		} else {
+			loader, err = ConfiguredMarkdownRegistry(cfg.ConfigFiles...)
+		}
+		if err != nil {
+			if owned {
+				_ = cfg.Store.Close()
 			}
+			return nil, fmt.Errorf("agent registry: %w", err)
+		}
+		if agentPathsExplicit || !loader.Empty() {
 			cfg.AgentRegistry = loader
 		}
 	}
@@ -142,6 +152,9 @@ func New(cfg Config) (*App, error) {
 		cfg.DrainTimeout = 30 * time.Second
 	}
 	a := &App{cfg: cfg, checkpoint: cfg.Checkpoint, runs: cfg.RunStore, events: cfg.Events, provider: cfg.Provider, registry: cfg.AgentRegistry, tracer: cfg.Tracer, workflows: make(map[string]*registeredWorkflow), wake: make(chan struct{}, 1)}
+	if registry, ok := a.registry.(reloadableRegistry); ok {
+		registry.SetOnChange(func(status ConfigStatus) { a.events.Publish(Event{Kind: EventConfigChanged, Data: mustJSON(status)}) })
+	}
 	if owned {
 		a.ownedStore = cfg.Store
 	}
@@ -266,6 +279,23 @@ func (a *App) ListRuns(ctx context.Context, filter RunFilter) ([]*Run, error) {
 
 func (a *App) GetRun(ctx context.Context, id string) (*Run, error) { return a.runs.Get(ctx, id) }
 func (a *App) EventSink() EventSink                                { return a.events }
+func (a *App) ConfigStatus() ConfigStatus {
+	if registry, ok := a.registry.(reloadableRegistry); ok {
+		return registry.Status()
+	}
+	return ConfigStatus{}
+}
+func (a *App) ReloadConfig(_ context.Context) error {
+	registry, ok := a.registry.(reloadableRegistry)
+	if !ok {
+		return errors.New("configuration is not reloadable")
+	}
+	if err := registry.Reload(); err != nil {
+		return err
+	}
+	a.events.Publish(Event{Kind: EventConfigReloaded, Data: mustJSON(registry.Status())})
+	return nil
+}
 
 func fingerprint(root *ir.Node) string {
 	h := sha256.New()
@@ -427,6 +457,9 @@ func (a *App) Serve(ctx context.Context) error {
 	if err := a.recoverRuns(ctx); err != nil {
 		return err
 	}
+	if registry, ok := a.registry.(reloadableRegistry); ok {
+		go func() { _ = registry.Watch(ctx) }()
+	}
 	httpServer := &http.Server{Addr: a.cfg.Listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	listener, err := net.Listen("tcp", a.cfg.Listen)
 	if err != nil {
@@ -548,9 +581,24 @@ func (a *App) engineRegistry(ctx context.Context) engine.Registry {
 				return engine.Persona{}, fmt.Errorf("persona %q not found", name)
 			}
 		}
-		m, err := a.provider.Model(ctx, p)
-		if err != nil {
-			return engine.Persona{}, err
+		modelNames := append([]string{p.Model}, p.FallbackModels...)
+		models := make([]model.BaseChatModel, 0, len(modelNames))
+		for _, modelName := range modelNames {
+			candidate := p
+			candidate.Model = modelName
+			m, err := a.provider.Model(ctx, candidate)
+			if err != nil {
+				return engine.Persona{}, err
+			}
+			models = append(models, m)
+		}
+		m := models[0]
+		if len(models) > 1 {
+			m = fallbackModel{models: models}
+		}
+		permissions := p.ToolPermissions
+		if len(permissions) == 0 {
+			permissions = append([]string(nil), p.Tools...)
 		}
 		tools := make([]tool.BaseTool, 0, len(p.Tools))
 		for _, toolName := range p.Tools {
@@ -558,7 +606,11 @@ func (a *App) engineRegistry(ctx context.Context) engine.Registry {
 			if !ok {
 				return engine.Persona{}, fmt.Errorf("persona %q: tool %q is not registered", name, toolName)
 			}
-			tools = append(tools, executable)
+			guarded, guardErr := agent.GuardTool(executable, permissions)
+			if guardErr != nil {
+				return engine.Persona{}, fmt.Errorf("persona %q: %w", name, guardErr)
+			}
+			tools = append(tools, guarded)
 		}
 		return engine.Persona{Model: m, System: p.SystemInstruction, Tools: tools}, nil
 	})

@@ -84,6 +84,9 @@ func commandTree(a *App) *cobra.Command {
 	runs := &cobra.Command{Use: "runs"}
 	runs.AddCommand(runTrigger(&endpoint), runList(&endpoint), runGet(&endpoint), runWatch(&endpoint), runDecision(&endpoint, true), runDecision(&endpoint, false), runCancel(&endpoint), runMigrate(&endpoint))
 	root.AddCommand(runs)
+	config := &cobra.Command{Use: "config"}
+	config.AddCommand(configStatus(&endpoint), configReload(&endpoint))
+	root.AddCommand(config)
 	root.AddCommand(&cobra.Command{Use: "tui", Short: "open the terminal client", RunE: func(cmd *cobra.Command, _ []string) error { return tui.Run(cmd.Context(), endpoint) }})
 	return root
 }
@@ -232,5 +235,23 @@ func runCancel(endpoint *string) *cobra.Command {
 func runMigrate(endpoint *string) *cobra.Command {
 	return &cobra.Command{Use: "migrate <id> <restart|abandon|finish_on_previous>", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		return client(endpoint).request(cmd.Context(), "POST", "/api/runs/"+args[0]+"/migration", map[string]string{"action": args[1]}, nil)
+	}}
+}
+func configStatus(endpoint *string) *cobra.Command {
+	return &cobra.Command{Use: "status", RunE: func(cmd *cobra.Command, _ []string) error {
+		var status ConfigStatus
+		if err := client(endpoint).request(cmd.Context(), "GET", "/api/config", nil, &status); err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), status)
+	}}
+}
+func configReload(endpoint *string) *cobra.Command {
+	return &cobra.Command{Use: "reload", RunE: func(cmd *cobra.Command, _ []string) error {
+		var status ConfigStatus
+		if err := client(endpoint).request(cmd.Context(), "POST", "/api/config/reload", nil, &status); err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), status)
 	}}
 }

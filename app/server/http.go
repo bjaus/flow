@@ -19,6 +19,8 @@ type Service interface {
 	Decide(context.Context, string, core.Decision) error
 	Cancel(context.Context, string) error
 	Migrate(context.Context, string, string) error
+	ConfigStatus() core.ConfigStatus
+	ReloadConfig(context.Context) error
 	EventSink() core.EventSink
 }
 
@@ -46,6 +48,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.list(w, r)
 	case r.Method == http.MethodGet && path == "/api/events":
 		h.sse(w, r, "")
+	case r.Method == http.MethodGet && path == "/api/config":
+		writeJSON(w, http.StatusOK, h.service.ConfigStatus())
+	case r.Method == http.MethodPost && path == "/api/config/reload":
+		if err := h.service.ReloadConfig(r.Context()); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, h.service.ConfigStatus())
 	case strings.HasPrefix(path, "/api/runs/"):
 		h.runRoute(w, r, strings.TrimPrefix(path, "/api/runs/"))
 	default:

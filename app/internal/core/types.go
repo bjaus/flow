@@ -48,6 +48,14 @@ type Decision struct {
 	Feedback string `json:"feedback,omitempty"`
 }
 
+type ConfigStatus struct {
+	Dirty     bool       `json:"dirty"`
+	LoadedAt  time.Time  `json:"loaded_at"`
+	ChangedAt *time.Time `json:"changed_at,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	Files     []string   `json:"files"`
+}
+
 type RunFilter struct {
 	Workflow string
 	Status   Status
@@ -65,6 +73,8 @@ const (
 	EventDecisionApplied EventKind = "decision.applied"
 	EventRunParked       EventKind = "run.parked"
 	EventRunResumed      EventKind = "run.resumed"
+	EventConfigChanged   EventKind = "config.changed"
+	EventConfigReloaded  EventKind = "config.reloaded"
 )
 
 type Event struct {
@@ -78,7 +88,11 @@ type Event struct {
 type Persona struct {
 	Name              string   `json:"name"`
 	Model             string   `json:"model"`
+	FallbackModels    []string `json:"fallback_models,omitempty"`
+	Profile           string   `json:"profile,omitempty"`
+	Roles             []string `json:"roles,omitempty"`
 	Tools             []string `json:"tools,omitempty"`
+	ToolPermissions   []string `json:"tool_permissions,omitempty"`
 	Skills            []string `json:"skills,omitempty"`
 	SystemInstruction string   `json:"system_instruction"`
 }

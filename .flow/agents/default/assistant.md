@@ -1,6 +1,6 @@
 ---
 name: assistant
-model: local
+profile: local
 skills: []
 tools: []
 ---

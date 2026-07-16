@@ -71,21 +71,35 @@ runtime contract in [`SPEC.md`](./SPEC.md).
 
 ## Personas and skills
 
-Personas are Markdown with YAML frontmatter:
+Flow merges `~/.flow/config.yml` and `.flow/config.yml` (project wins); `FLOW_CONFIG` can replace the project
+config path. Agent and skill roots are arrays and default to both user and project `.flow` directories:
+
+```yaml
+profiles:
+  coding: [primary-model, fallback-model]
+roles:
+  reader: ["read(**)"]
+  checks: ["bash(pnpm * check)"]
+```
+
+Personas declare abstract profiles and reusable roles. Inline tools add one-off grants; an agent with no grants
+has no tools:
 
 ```md
 ---
 name: planner
-model: local
+profile: coding
+roles: [reader, checks]
 skills: [review]
-tools: []
+tools: ["search(docs/**)"]
 ---
 You create concise, executable plans.
 ```
 
-Skills use the portable `SKILL.md` convention. Both directories hot-reload; edits affect the next agent call
-without rebuilding or disturbing in-flight runs. Gateway configuration and credentials come only from the
-environment; copy [`.env.example`](./.env.example).
+Skills use the portable `SKILL.md` convention. Flow reports watched changes without activating them; use
+`flow config reload`, press `c` in the TUI, or use the web/API reload control. Shell wildcard grants cannot
+match command chaining or substitution. Gateway credentials come only from the environment; copy
+[`.env.example`](./.env.example).
 
 ## Runtime configuration
 

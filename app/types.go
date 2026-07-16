@@ -25,6 +25,7 @@ const (
 
 type Run = core.Run
 type Decision = core.Decision
+type ConfigStatus = core.ConfigStatus
 type RunFilter = core.RunFilter
 type EventKind = core.EventKind
 
@@ -51,6 +52,8 @@ const (
 	EventDecisionApplied = core.EventDecisionApplied
 	EventRunParked       = core.EventRunParked
 	EventRunResumed      = core.EventRunResumed
+	EventConfigChanged   = core.EventConfigChanged
+	EventConfigReloaded  = core.EventConfigReloaded
 )
 
 type Stores struct {
@@ -79,8 +82,11 @@ type FakeScript = provider.Script
 
 func FakeProvider(script FakeScript) *provider.Fake    { return provider.NewFake(script) }
 func Gateway(baseURL string) *provider.GatewayProvider { return provider.NewGateway(baseURL) }
-func MarkdownRegistry(agentsDir, skillsDir string) (*agent.Loader, error) {
-	return agent.New(agentsDir, skillsDir)
+func MarkdownRegistry(agents, skills []string) (*agent.Loader, error) {
+	return agent.NewPaths(agents, skills)
+}
+func ConfiguredMarkdownRegistry(configFiles ...string) (*agent.Loader, error) {
+	return agent.NewConfigured(configFiles...)
 }
 func NoopTracer() Tracer { return core.NoopTracer() }
 

@@ -79,7 +79,7 @@ github.com/bjaus/flow                      the repository — product name: "flo
 │   ├── server/       daemon: queue, worker, run lifecycle, HTTP + SSE API
 │   ├── store/        CheckpointStore + RunStore + EventSink (SQLite default; pluggable)
 │   ├── provider/     model provider (local gateway + a fake for tests)
-│   ├── agent/        loads personas + skills from ./agents and ./skills markdown; hot-reload
+│   ├── agent/        loads personas + skills from configured user/project paths; explicit reload
 │   ├── tui/          Bubble Tea terminal client of the API
 │   ├── web/          the PWA: static assets embedded via embed.FS, served by the daemon
 │   └── cmd/flowd/    reference daemon binary (the example main a user copies)
@@ -208,8 +208,8 @@ func main() {
     a, err := app.New(app.Config{
         Store:    app.SQLite("flow.db"),                       // default if nil
         Provider: app.Gateway(os.Getenv("FLOW_GATEWAY_URL")),  // OpenAI-compatible endpoint
-        Agents:   "./agents",                                  // default "./agents"
-        Skills:   "./skills",                                  // default "./skills"
+        Agents:   []string{"./company/agents"},                 // optional path override
+        Skills:   []string{"./company/skills"},                 // optional path override
         Listen:   ":7788",
     })
     if err != nil {
@@ -227,8 +227,8 @@ func main() {
 For the smallest possible start, a package-level convenience constructs defaults and serves in one call:
 
 ```go
-// Serve builds an App with default config (SQLite ./flow.db, gateway from $FLOW_GATEWAY_URL, ./agents +
-// ./skills), registers the given workflows, and runs until ctx is canceled.
+// Serve builds an App with default config (SQLite ./flow.db, gateway from $FLOW_GATEWAY_URL, and the
+// user/project .flow configuration), registers the given workflows, and runs until ctx is canceled.
 func Serve(ctx context.Context, workflows ...AnyWorkflow) error
 ```
 
@@ -292,8 +292,8 @@ type Provider interface {
     Model(ctx context.Context, persona Persona) (engine.ChatModel, error)
 }
 
-// AgentRegistry resolves persona names to Personas loaded from markdown, rebuilt per invocation. Default:
-// the ./agents + ./skills loader (§7).
+// AgentRegistry resolves persona names to Personas loaded from markdown. Default: the configured
+// ~/.flow + project .flow loader (§7), whose snapshot changes only on explicit reload.
 type AgentRegistry interface {
     Persona(name string) (Persona, bool)
 }
@@ -441,15 +441,17 @@ Personas and skills are **markdown files, resolved by name**, not hard-coded Go.
 edit an agent's behavior without a rebuild, and it enforces the invariant that an **agent file is a persona
 while the runtime prompt is the task**.
 
-- A **persona** file carries frontmatter (`name`, `model`, `tools`, `skills`) and a system instruction in its
-  body. A **skill** is a packaged capability an agent loads on demand, following the `SKILL.md` convention so
-  existing ecosystem files are reusable; `AGENTS.md` conventions apply to personas.
-- The **directories are configurable with defaults**: `Config.Agents` (default `./agents`) and `Config.Skills`
-  (default `./skills`). The loader parses them into `Persona` values.
-- Because no run state is tied to a persona's definition and agents are **built fresh per invocation**, editing
-  a persona or skill file is safe while runs are in flight — it takes effect on the next agent step. The
-  registry **watches these directories and hot-reloads**; such an edit is not a deployment and never triggers
-  the versioning machinery of §12.
+- A **persona** file carries frontmatter (`name`, `profile`, `roles`, `tools`, `skills`) and a system instruction
+  in its body. `profile` resolves to an ordered model ladder in configuration. Roles contribute reusable tool
+  grants and skills; inline `tools` union one-off grants. No role or tool means deny-all. A **skill** follows the
+  reusable `SKILL.md` convention.
+- Configuration merges `~/.flow/config.yml` then `.flow/config.yml` (project wins); `FLOW_CONFIG` replaces the
+  project config path. `agents` and `skills` are arrays of roots, defaulting to user and project
+  `~/.flow/{agents,skills}` + `.flow/{agents,skills}`. Programmatic `Config.Agents`/`Config.Skills` arrays can
+  override them.
+- The registry watches config, agent, and skill files and marks its active snapshot **dirty**, but does not
+  mutate a daemon underneath in-flight work. CLI, TUI, web, and HTTP API expose an explicit reload. The new
+  snapshot is used by the next agent step; reload errors preserve the last valid snapshot.
 
 The runtime ships a small set of default personas and skills so a freshly scaffolded project runs immediately;
 they are ordinary files the developer edits or replaces.
@@ -463,10 +465,11 @@ An `Agent` step's actual LLM call goes through the `Provider` port, which builds
 - The **default** provider targets an **OpenAI-compatible gateway** (base URL and key from the environment),
   which lets an operator point every workflow at a local model server or a hosted endpoint without code
   changes, and centralizes rate/cost control.
-- A persona names its model and, optionally, tools by name. The app resolves those tool names to executable
-  tools (a small tool registry) and hands the engine a tool-bound `engine.Persona`, so a tool-bearing Agent
-  runs a native ReAct loop; the provider builds the chat model bound to the gateway. An `Agent`'s typed output
-  defines a structured-output contract the runtime decodes and, on a malformed response, retries.
+- A persona names an abstract profile and roles. Configuration resolves the profile to a primary model plus
+  ordered fallbacks and roles to tool grants. The app supplies only granted tools to the native ReAct loop and
+  guards each invocation against its resource/command pattern; shell wildcards cannot consume chaining or
+  substitution metacharacters. The provider walks fallback models on failures. An `Agent`'s typed output defines
+  a structured-output contract the runtime decodes and, on a malformed response, retries.
 - A **fake provider** returns scripted structured outputs keyed by persona name and input. It is the backbone
   of the testing strategy (§14): any workflow, including the hardest multi-agent ones, runs deterministically
   with zero tokens.
@@ -612,8 +615,8 @@ Whether a parked run can resume on a new binary depends entirely on whether the 
 Because a definition is walkable data, the runtime computes a **structural fingerprint** — a hash of node
 kinds, edges, and types — and stores it on each run. Three tiers follow:
 
-**Tier 0 — not a binary change.** Editing a persona, skill, or prompt is *data* (§7): it hot-reloads and takes
-effect on the next agent step, with no rebuild and no deployment. A large share of "changing a workflow" lands
+**Tier 0 — not a binary change.** Editing configuration, a persona, skill, or prompt is *data* (§7): the daemon
+detects it and an operator explicitly reloads it, with no rebuild and no deployment. A large share of "changing a workflow" lands
 here and never engages this machinery.
 
 **Tier 1 — binary changed, workflow shape unchanged.** Fixing a server bug, improving a UI, upgrading the
@@ -693,7 +696,7 @@ optional scaffolder runnable without installation writes the starter into the *c
 repository involved):
 
 ```
-go run github.com/bjaus/flow/cmd/flow@latest init     # writes main.go, ./agents, ./skills, a justfile — here
+go run github.com/bjaus/flow/cmd/flow@latest init     # writes main.go, .flow/config.yml + agents/skills, a justfile
 ```
 
 Build the scaffolder only if the example proves insufficient; it changes nothing about how updates flow.
@@ -901,9 +904,9 @@ zero tokens.
 - **Goal.** Markdown personas/skills resolved into an `engine.Registry`, the real model gateway, and the
   external-observability integration.
 - **Build.**
-  - `app/agent`: a loader for `./agents` (persona frontmatter `name`/`model`/`tools`/`skills` + system-
-    instruction body) and `./skills` (`SKILL.md`), with configurable directories defaulting to `./agents` and
-    `./skills`; a filesystem watcher that hot-reloads on change (rebuild personas on the next invocation).
+  - `app/agent`: a loader for configured user/project agent and skill roots (persona frontmatter
+    `name`/`profile`/`roles`/`tools`/`skills` + system instruction), merged config files, profile model ladders,
+    deny-by-default guarded tool grants, and a watcher that reports dirty state for explicit reload.
   - `app/provider`: the OpenAI-compatible gateway provider building an `engine.ChatModel` bound to
     `FLOW_GATEWAY_URL` and the key from the environment, with the persona's tools attached; structured-output
     decoding with retry-on-invalid.
@@ -914,8 +917,8 @@ zero tokens.
     resolving each persona's tool names to executable tools (a small app tool registry) and setting them on the
     `engine.Persona` so tool-bearing agents run their native ReAct loop; ship a small set of default
     persona/skill files.
-- **Done when.** The loader parses sample personas/skills; editing a persona file changes behavior on the next
-  invocation (tested via an injected watch event); the gateway provider builds a working model in an
+- **Done when.** The loader parses sample personas/skills; editing a watched file reports dirty state and an
+  explicit reload changes the next invocation; the gateway provider builds a working model in an
   integration test that is **skipped when `FLOW_GATEWAY_URL` is unset**; malformed structured output triggers a
   retry; with an OTLP endpoint set, a run produces a run→step→agent span tree in the collector (and the no-op
   default emits nothing).
@@ -976,8 +979,8 @@ zero tokens.
 - **Goal.** A shippable, documented product.
 - **Build.**
   - `app/cmd/flowd`: the reference daemon `main` (with `--demo`) and the `tui` subcommand.
-  - The standalone `cmd/flow` tool: `flow init` writes a starter `main.go`, `./agents`, `./skills`, and a
-    `justfile` into the current directory (no hosted repo), runnable via `go run …/cmd/flow@latest init`; it
+  - The standalone `cmd/flow` tool: `flow init` writes a starter `main.go`, `.flow/config.yml`, project agents
+    and skills, and a `justfile` into the current directory (no hosted repo), runnable via `go run …/cmd/flow@latest init`; it
     also mounts `app.ClientCLI()` (§11) so `flow runs …`/`flow workflows …`/`flow tui` work against any daemon
     without a build.
   - README quickstart (the ~10-line `main`, `go get`, `go build`), a populated `examples/`, and the
