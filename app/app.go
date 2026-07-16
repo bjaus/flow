@@ -475,8 +475,11 @@ func (a *App) Migrate(ctx context.Context, id, action string) error {
 	if err := a.runs.Save(ctx, r); err != nil {
 		return err
 	}
-	if action == "restart" {
+	switch action {
+	case "restart":
 		a.signal()
+	case "abandon":
+		a.resumeAwaitingParents(ctx, r.ID)
 	}
 	return nil
 }
@@ -489,7 +492,7 @@ func (a *App) Cancel(ctx context.Context, id string) error {
 	if r.Status.Terminal() {
 		return fmt.Errorf("run %q is already terminal", id)
 	}
-	if r.Status == StatusQueued || r.Status == StatusAwaitingReview || r.Status == StatusParked {
+	if r.Status == StatusQueued || r.Status == StatusAwaitingReview || r.Status == StatusAwaitingChild || r.Status == StatusParked {
 		now := time.Now().UTC()
 		r.Status = StatusCanceled
 		r.FinishedAt = &now
@@ -501,7 +504,13 @@ func (a *App) Cancel(ctx context.Context, id string) error {
 	}
 	// Canceling a parent cancels its children: descend before the parent's
 	// own cancel completes so queued children never get claimed afterwards.
-	return a.cancelChildren(ctx, r.ID)
+	if err := a.cancelChildren(ctx, r.ID); err != nil {
+		return err
+	}
+	if r.Status == StatusCanceled {
+		a.resumeAwaitingParents(ctx, r.ID)
+	}
+	return nil
 }
 
 func (a *App) signal() {
@@ -641,6 +650,35 @@ func (a *App) recoverRuns(ctx context.Context) error {
 			}
 		}
 	}
+	// A parent awaiting a child stays parked until the child is terminal; if
+	// the child finished (or vanished) while the daemon was down, resume the
+	// parent now. A still-in-flight child wakes it through the normal
+	// terminal-state notification once the worker finishes the child.
+	waiting, err := a.runs.List(ctx, RunFilter{Status: StatusAwaitingChild})
+	if err != nil {
+		return err
+	}
+	for _, r := range waiting {
+		a.mu.RLock()
+		wf := a.workflows[r.Workflow]
+		a.mu.RUnlock()
+		if wf == nil || wf.info.Fingerprint != r.Fingerprint {
+			r.Status = StatusNeedsMigration
+			if err := a.runs.Save(ctx, r); err != nil {
+				return err
+			}
+			continue
+		}
+		child, childErr := a.runs.Get(ctx, r.WaitingOn)
+		if childErr == nil && !child.Status.Terminal() {
+			continue
+		}
+		r.Status = StatusQueued
+		if err := a.runs.Save(ctx, r); err != nil {
+			return err
+		}
+		a.events.Publish(Event{RunID: r.ID, Kind: EventRunResumed})
+	}
 	return nil
 }
 
@@ -716,7 +754,18 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 	runCtx = engine.WithCheckpointScope(runCtx, run.ID)
 	// Let steps spawn and await child runs of other registered workflows (spawn.go).
 	runCtx = a.withSpawner(runCtx, run)
-	if run.Decision != nil && run.InterruptID != "" {
+	switch {
+	case run.WaitingOn != "" && run.InterruptID != "":
+		// The run suspended awaiting a child (spawn.go): resume it with the
+		// child's terminal outcome as a machine decision, mirroring how a
+		// human gate resumes with an operator decision.
+		child, getErr := a.runs.Get(ctx, run.WaitingOn)
+		if getErr != nil {
+			return a.fail(run, fmt.Errorf("awaited child %s: %w", run.WaitingOn, getErr))
+		}
+		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, awaitOutcome{ChildRunID: child.ID, Status: child.Status, Result: child.Result, Error: child.Error})
+		run.WaitingOn = ""
+	case run.Decision != nil && run.InterruptID != "":
 		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, flow.Decision{Approved: run.Decision.Approved, Feedback: run.Decision.Feedback, Outcome: run.Decision.Outcome})
 		run.Decision = nil
 	}
@@ -745,17 +794,33 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 	}
 	span.End(err)
 	if info, interrupted := compose.ExtractInterruptInfo(err); interrupted {
+		var payload any
 		for _, ic := range info.InterruptContexts {
 			if ic != nil && ic.IsRootCause {
-				run.InterruptID = ic.ID
-				run.GatePrompt = fmt.Sprint(ic.Info)
+				run.InterruptID, payload = ic.ID, ic.Info
 				break
 			}
 		}
 		if run.InterruptID == "" && len(info.InterruptContexts) > 0 {
-			run.InterruptID = info.InterruptContexts[0].ID
-			run.GatePrompt = fmt.Sprint(info.InterruptContexts[0].Info)
+			run.InterruptID, payload = info.InterruptContexts[0].ID, info.InterruptContexts[0].Info
 		}
+		if gate, awaited := payload.(awaitGate); awaited {
+			// An Await suspension (spawn.go), not a human gate: park the run
+			// until the awaited child is terminal.
+			run.Status, run.WaitingOn, run.GatePrompt = StatusAwaitingChild, gate.ChildRunID, ""
+			if saveErr := a.runs.Save(context.Background(), run); saveErr != nil {
+				return saveErr
+			}
+			a.events.Publish(Event{RunID: run.ID, Kind: EventRunAwaitingChild, Data: mustJSON(map[string]string{"child": gate.ChildRunID})})
+			// The child may have gone terminal between Await's check and this
+			// save (e.g. canceled via the API): re-enqueue immediately rather
+			// than miss the wakeup.
+			if child, childErr := a.runs.Get(context.Background(), gate.ChildRunID); childErr != nil || child.Status.Terminal() {
+				a.resumeAwaitingParents(context.Background(), gate.ChildRunID)
+			}
+			return nil
+		}
+		run.GatePrompt = fmt.Sprint(payload)
 		run.Status = StatusAwaitingReview
 		if saveErr := a.runs.Save(context.Background(), run); saveErr != nil {
 			return saveErr
@@ -782,6 +847,7 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 			// The parent reached terminal via cancel: take down any children still in flight.
 			_ = a.cancelChildren(context.Background(), run.ID)
 			a.events.Publish(Event{RunID: run.ID, Kind: EventRunFinished, Data: mustJSON(map[string]any{"status": StatusCanceled})})
+			a.resumeAwaitingParents(context.Background(), run.ID)
 			return nil
 		}
 		return a.fail(run, err)
@@ -801,6 +867,7 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 	}
 	_ = a.checkpoint.Delete(context.Background(), run.ID)
 	a.events.Publish(Event{RunID: run.ID, Kind: EventRunFinished, Data: mustJSON(map[string]any{"status": run.Status, "result": out})})
+	a.resumeAwaitingParents(context.Background(), run.ID)
 	return nil
 }
 
@@ -813,6 +880,7 @@ func (a *App) fail(run *Run, cause error) error {
 		return err
 	}
 	a.events.Publish(Event{RunID: run.ID, Kind: EventRunFinished, Data: mustJSON(map[string]any{"status": run.Status, "error": run.Error})})
+	a.resumeAwaitingParents(context.Background(), run.ID)
 	return nil
 }
 

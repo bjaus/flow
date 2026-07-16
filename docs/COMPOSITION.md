@@ -64,10 +64,12 @@ For separate operations, use `spawner, ok := app.SpawnerFrom(ctx)`, then `Spawn`
 `ParentID`, can be listed with `runs list --parent`, and are canceled when their parent is canceled. Spawn depth
 is capped by `app.MaxSpawnDepth`.
 
-Current tradeoff: awaiting executes queued children inline to avoid deadlocking the single worker. The parent
-stays running, and an inline chain is not independently resumable across restart. Use this feature when
-separate run records or registration boundaries justify that lifecycle; prefer in-run step composition for
-strongest checkpoint semantics.
+Awaiting suspends the parent durably (status `awaiting_child`), freeing the single worker for the child; the
+parent checkpoints at the `Await` and resumes with the child's result once the child is terminal — including
+across a daemon restart. Two consequences for step authors: the error `Await` returns while suspending is the
+engine's interrupt signal and must be returned from the `Do` step unchanged, and the step body replays from
+the top on resume, so code before the `Await` should be idempotent (`Spawn` itself is replay-aware and will
+not duplicate children).
 
 ## Packaging components
 

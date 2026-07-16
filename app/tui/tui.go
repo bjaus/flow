@@ -135,7 +135,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected++
 			}
 		case "f":
-			filters := []core.Status{"", core.StatusRunning, core.StatusAwaitingReview, core.StatusSucceeded, core.StatusFailed}
+			filters := []core.Status{"", core.StatusRunning, core.StatusAwaitingReview, core.StatusAwaitingChild, core.StatusSucceeded, core.StatusFailed}
 			for i, status := range filters {
 				if status == m.filter {
 					m.filter = filters[(i+1)%len(filters)]
@@ -313,7 +313,7 @@ func statusRank(status core.Status) int {
 		return 0
 	case core.StatusQueued:
 		return 1
-	case core.StatusAwaitingReview:
+	case core.StatusAwaitingReview, core.StatusAwaitingChild:
 		return 2
 	case core.StatusParked, core.StatusNeedsMigration:
 		return 3

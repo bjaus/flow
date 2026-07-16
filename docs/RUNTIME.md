@@ -168,8 +168,9 @@ replay before following live.
 ## Child runs
 
 Inside runtime-driven `Do`, `app.SpawnAwait(ctx, name, input)` invokes another registered workflow. Use
-`app.SpawnerFrom` for separate spawn/await. Parent IDs are queryable and cancellation cascades to descendants.
-See [Composition](COMPOSITION.md) for lifecycle tradeoffs.
+`app.SpawnerFrom` for separate spawn/await. Awaiting suspends the parent durably (`awaiting_child`) until the
+child is terminal, surviving daemon restarts. Parent IDs are queryable and cancellation cascades to
+descendants. See [Composition](COMPOSITION.md) for lifecycle details.
 
 ## Clients
 

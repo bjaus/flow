@@ -205,9 +205,28 @@ func (c *compiler) lowerAction(n *ir.Node) (string, string, error) {
 	}
 	fn := n.Invoke
 	err := c.g.AddLambdaNode(key, compose.InvokableLambda(func(ctx context.Context, in any) (any, error) {
-		return fn(ctx, in)
+		// A step resumed after an in-body Suspend re-runs from its top with
+		// the input Suspend checkpointed; eino restores state, not the value
+		// that was in flight on the edge.
+		if was, has, saved := compose.GetInterruptState[any](ctx); was && has {
+			in = saved
+		}
+		return fn(context.WithValue(ctx, stepInputKey{}, in), in)
 	}), compose.WithNodeName(label(n)))
 	return key, key, err
+}
+
+// stepInputKey carries the executing Do step's input so Suspend can checkpoint it.
+type stepInputKey struct{}
+
+// Suspend durably interrupts the enclosing Do step from inside its body. The engine checkpoints the step's
+// input and re-invokes the step with that same input after resume (eino restores checkpointed state, not
+// values in flight on an edge, so a mid-body interrupt must persist its own input — the same pattern a Human
+// gate applies). payload identifies the interrupt to the host application via compose.ExtractInterruptInfo;
+// resume with compose.ResumeWithData and read it back inside the step with compose.GetResumeContext. The
+// returned error is the engine's interrupt signal and must propagate out of the step unchanged.
+func Suspend(ctx context.Context, payload any) error {
+	return compose.StatefulInterrupt(ctx, payload, ctx.Value(stepInputKey{}))
 }
 
 // nodeKey returns the author-controlled node key (Step.ID) when set, so per-node run options can target it
@@ -225,6 +244,10 @@ func (c *compiler) nodeKey(n *ir.Node, prefix string) string {
 func (c *compiler) lowerStateAction(n *ir.Node, key string) (string, string, error) {
 	fn := n.StateInvoke
 	err := c.g.AddLambdaNode(key, compose.InvokableLambda(func(ctx context.Context, in any) (any, error) {
+		if was, has, saved := compose.GetInterruptState[any](ctx); was && has {
+			in = saved
+		}
+		ctx = context.WithValue(ctx, stepInputKey{}, in)
 		get := func() any {
 			var v any
 			_ = compose.ProcessState(ctx, func(_ context.Context, b *stateBox) error { v = b.V; return nil })

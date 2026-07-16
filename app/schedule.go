@@ -124,10 +124,10 @@ func (a *App) fire(ctx context.Context, t Trigger) {
 	}
 }
 
-// triggerBusy reports whether a run created by t is still queued, running, or
-// awaiting review.
+// triggerBusy reports whether a run created by t is still queued, running,
+// awaiting review, or awaiting a child run.
 func (a *App) triggerBusy(ctx context.Context, t Trigger) (bool, error) {
-	for _, status := range []Status{StatusQueued, StatusRunning, StatusAwaitingReview} {
+	for _, status := range []Status{StatusQueued, StatusRunning, StatusAwaitingReview, StatusAwaitingChild} {
 		runs, err := a.runs.List(ctx, RunFilter{Workflow: t.Workflow, Status: status})
 		if err != nil {
 			return false, err

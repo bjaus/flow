@@ -1,12 +1,15 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+	"sync"
 
+	"github.com/bjaus/flow/engine"
+	"github.com/cloudwego/eino/compose"
 	"github.com/samber/lo"
 )
 
@@ -26,7 +29,10 @@ type Spawner interface {
 	// The child records the calling run as its parent (Run.ParentID).
 	Spawn(ctx context.Context, workflow string, input any) (runID string, err error)
 	// Await blocks until the run is terminal and returns its result. A
-	// failed or canceled child surfaces as an error.
+	// failed or canceled child surfaces as an error. When the run is not
+	// yet terminal, Await suspends the parent durably (see the method's
+	// doc on runSpawner): the error it returns is the engine's interrupt
+	// signal and MUST propagate out of the Do step unchanged.
 	Await(ctx context.Context, runID string) (result json.RawMessage, err error)
 }
 
@@ -54,13 +60,34 @@ func SpawnAwait(ctx context.Context, workflow string, input any) (json.RawMessag
 }
 
 func (a *App) withSpawner(ctx context.Context, run *Run) context.Context {
-	return context.WithValue(ctx, spawnerKey{}, &runSpawner{app: a, run: run})
+	return context.WithValue(ctx, spawnerKey{}, &runSpawner{app: a, run: run, calls: map[string]int{}})
 }
 
-// runSpawner is the Spawner bound to one executing run.
+// runSpawner is the Spawner bound to one executing run. It tracks how many
+// times each (workflow, input) pair was spawned during this execution, so a
+// step body replayed after an await-resume reuses the children it already
+// created instead of enqueuing duplicates.
 type runSpawner struct {
 	app *App
 	run *Run
+
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+// awaitGate is the interrupt payload an Await suspension carries; the worker
+// detects it (by type) to park the parent as awaiting_child rather than
+// surfacing a human gate.
+type awaitGate struct{ ChildRunID string }
+
+// awaitOutcome is the machine decision the worker resumes an awaiting parent
+// with once its child is terminal — the exact mirror of the operator decision
+// a human gate resumes with.
+type awaitOutcome struct {
+	ChildRunID string
+	Status     Status
+	Result     json.RawMessage
+	Error      string
 }
 
 func (s *runSpawner) Spawn(ctx context.Context, workflow string, input any) (string, error) {
@@ -75,77 +102,66 @@ func (s *runSpawner) Spawn(ctx context.Context, workflow string, input any) (str
 	if err != nil {
 		return "", fmt.Errorf("spawn %q: marshal input: %w", workflow, err)
 	}
+	// A parent resumed from an await-suspension replays its Do step from the
+	// top, re-executing every Spawn before the Await. Match this call
+	// positionally against the children this run already has for the same
+	// (workflow, input), so replay returns the existing child.
+	key := workflow + "\x00" + string(raw)
+	s.mu.Lock()
+	nth := s.calls[key]
+	s.calls[key]++
+	s.mu.Unlock()
+	children, err := s.app.runs.List(ctx, RunFilter{ParentID: s.run.ID, Workflow: workflow})
+	if err != nil {
+		return "", fmt.Errorf("spawn %q: %w", workflow, err)
+	}
+	matches := lo.Filter(children, func(r *Run, _ int) bool { return bytes.Equal(r.Input, raw) })
+	if nth < len(matches) {
+		return matches[nth].ID, nil
+	}
 	return s.app.enqueue(ctx, workflow, raw, "", s.run.ID)
 }
 
-// Await drives the child to a terminal state and returns its result.
+// Await returns the child's result, suspending the parent durably while the
+// child is still in flight.
 //
-// Deadlock: the daemon has a single worker (§6.2), and the parent occupies it
-// for the whole Await — a queued child would never be claimed. Rather than
-// park the parent as awaiting-child and free the worker (durable, but it needs
-// a new run state, checkpointing at the Await point, and scheduler support),
-// v1 drives the child inline: Await claims the queued child directly
-// (RunStore.ClaimByID) and executes it re-entrantly in the parent's worker
-// slot. The tradeoff is that the parent stays `running` (and holds the worker)
-// while the child runs or waits at a human gate, and an inline child does not
-// survive a daemon restart as a resumable parent would. If the child is not
-// claimable (another worker took it, or it is awaiting review), Await polls
-// until it is queued again or terminal. The seam for the heavier approach is
-// exactly here: replace the inline drive with a park-and-notify without
-// touching the Spawner API.
+// A child already terminal is answered inline. Otherwise Await interrupts the
+// parent's graph exactly here (compose.StatefulInterrupt), the worker parks
+// the run as awaiting_child, and the worker slot is freed for the child. When
+// the child reaches a terminal state the daemon re-enqueues the parent and
+// resumes it with the child's outcome (compose.ResumeWithData); the replayed
+// Await consumes that outcome and returns. Failure and cancellation of the
+// child surface as errors, exactly as in the inline path.
 func (s *runSpawner) Await(ctx context.Context, runID string) (json.RawMessage, error) {
-	for {
-		r, err := s.app.runs.Get(ctx, runID)
-		if err != nil {
-			return nil, fmt.Errorf("await %s: %w", runID, err)
-		}
-		switch r.Status {
-		case StatusSucceeded:
-			return r.Result, nil
-		case StatusFailed:
-			return nil, fmt.Errorf("child run %s failed: %s", runID, r.Error)
-		case StatusCanceled:
-			return nil, fmt.Errorf("child run %s canceled", runID)
-		case StatusNeedsMigration:
-			return nil, fmt.Errorf("child run %s needs migration", runID)
-		case StatusQueued:
-			claimed, err := s.app.claimRun(ctx, runID)
-			if err != nil {
-				return nil, fmt.Errorf("await %s: %w", runID, err)
-			}
-			if claimed != nil {
-				if err := s.app.execute(ctx, claimed); err != nil {
-					return nil, fmt.Errorf("await %s: %w", runID, err)
-				}
-				continue
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(25 * time.Millisecond):
-		}
+	// If this Await is the resume target, the daemon already folded the
+	// child's terminal outcome into the resume context.
+	if resumed, _, outcome := compose.GetResumeContext[awaitOutcome](ctx); resumed && outcome.ChildRunID == runID && outcome.Status.Terminal() {
+		return childResult(runID, outcome.Status, outcome.Result, outcome.Error)
 	}
+	r, err := s.app.runs.Get(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("await %s: %w", runID, err)
+	}
+	if r.Status.Terminal() {
+		return childResult(runID, r.Status, r.Result, r.Error)
+	}
+	// Suspend the parent: the engine checkpoints the run at this step and the
+	// returned interrupt error must propagate out of the Do function.
+	return nil, engine.Suspend(ctx, awaitGate{ChildRunID: runID})
 }
 
-// claimRun claims one specific queued run, preferring the store's transactional
-// ClaimByID and falling back to an optimistic save for stores without it.
-func (a *App) claimRun(ctx context.Context, id string) (*Run, error) {
-	if c, ok := a.runs.(interface {
-		ClaimByID(context.Context, string) (*Run, error)
-	}); ok {
-		return c.ClaimByID(ctx, id)
+// childResult maps a terminal child status to Await's result contract.
+func childResult(runID string, status Status, result json.RawMessage, errText string) (json.RawMessage, error) {
+	switch status {
+	case StatusSucceeded:
+		return result, nil
+	case StatusFailed:
+		return nil, fmt.Errorf("child run %s failed: %s", runID, errText)
+	case StatusCanceled:
+		return nil, fmt.Errorf("child run %s canceled", runID)
+	default:
+		return nil, fmt.Errorf("child run %s resumed while %s", runID, status)
 	}
-	r, err := a.runs.Get(ctx, id)
-	if err != nil || r.Status != StatusQueued {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	r.Status = StatusRunning
-	if r.StartedAt == nil {
-		r.StartedAt = &now
-	}
-	return r, a.runs.Save(ctx, r)
 }
 
 // spawnDepth counts a run's ancestors by walking ParentID links.
@@ -175,4 +191,21 @@ func (a *App) cancelChildren(ctx context.Context, parentID string) error {
 		}
 	}
 	return nil
+}
+
+// resumeAwaitingParents re-enqueues every run suspended awaiting the given
+// run, now that it is terminal. The resumed parent recovers the child's
+// outcome in execute via compose.ResumeWithData.
+func (a *App) resumeAwaitingParents(ctx context.Context, childID string) {
+	waiting, err := a.runs.List(ctx, RunFilter{Status: StatusAwaitingChild})
+	if err != nil {
+		return
+	}
+	for _, parent := range lo.Filter(waiting, func(r *Run, _ int) bool { return r.WaitingOn == childID }) {
+		parent.Status = StatusQueued
+		if a.runs.Save(ctx, parent) == nil {
+			a.events.Publish(Event{RunID: parent.ID, Kind: EventRunResumed})
+			a.signal()
+		}
+	}
 }

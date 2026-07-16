@@ -352,6 +352,7 @@ A **Run** is one execution of a registered workflow on an input. Its states:
 | `queued` | accepted, waiting for the worker |
 | `running` | the worker is executing a step |
 | `awaiting_review` | suspended at a human gate; waiting for a decision |
+| `awaiting_child` | suspended at an `Await`; waiting for a spawned child run to reach a terminal state (§6.7) |
 | `parked` | drained at a step boundary during shutdown; resumable (§12) |
 | `needs_migration` | its workflow's shape changed under it; awaiting an operator decision (§12) |
 | `succeeded` / `failed` / `canceled` | terminal |
@@ -400,6 +401,7 @@ Events are the run's story, consumed identically by the TUI and the PWA. The kin
   "typing" live (forwarded from the engine's streaming callback, including inside concurrent fan-outs)
 - `gate.reached` — a human gate opened, carrying what the operator must see
 - `decision.applied` — a decision was folded in and the run resumed
+- `run.awaiting_child` — a run suspended awaiting a spawned child (§6.7)
 - `run.parked`, `run.resumed` — drain/redeploy transitions (§12)
 - `trigger.skipped` — a scheduled trigger (§6.6) declined to enqueue, with the reason
 
@@ -443,8 +445,8 @@ whose workflow is not registered or whose input does not decode to the workflow'
 the daemon enqueues a run through the same path as `POST /api/runs`, stamping the run with the trigger's name
 (`Run.Trigger`) so scheduled runs are attributable. A firing is skipped — publishing a `trigger.skipped` event
 with the reason — while the daemon is draining or while the trigger's previous run is still `queued`,
-`running`, or `awaiting_review`, so a slow workflow never piles up behind its own schedule. The scheduler
-stops with the worker on shutdown.
+`running`, `awaiting_review`, or `awaiting_child`, so a slow workflow never piles up behind its own
+schedule. The scheduler stops with the worker on shutdown.
 
 ### 6.7 Child runs (workflow-calls-workflow)
 
@@ -460,11 +462,20 @@ inside a `Do` step it is recovered with `app.SpawnerFrom(ctx)`:
 - `Await(ctx, runID)` blocks until the child is terminal, returning its result; a failed or canceled child
   surfaces as an error. `app.SpawnAwait(ctx, workflow, input)` does both in one call.
 
-Await never deadlocks the single worker (§6.2): the parent occupies the worker while a queued child would
-otherwise wait forever, so Await claims the queued child directly and executes it **inline in the parent's
-worker slot** (re-entrant execute). The tradeoff — stated in the `Await` doc comment — is that the parent
-stays `running` while the child runs or waits at a human gate, and the inline chain is not independently
-resumable across a restart; the seam is left for a future park-the-parent scheme without changing the API.
+Awaiting is **durable suspension**, the same engine mechanism a human gate uses. A child already terminal at
+`Await` time is answered inline; otherwise `Await` interrupts the parent's graph exactly there
+(`engine.Suspend`, which checkpoints the step's input so the resumed step replays with it), the worker parks
+the run as `awaiting_child` (recording the awaited id as `Run.WaitingOn`, published as a
+`run.awaiting_child` event), and the worker slot is freed — so the single worker (§6.2) can claim the child
+and no deadlock is possible. When any run reaches a terminal state the daemon re-enqueues every run awaiting
+it; on resume the worker folds the child's outcome in as a machine decision (`compose.ResumeWithData`,
+mirroring human-gate resumes) and the replayed `Await` returns the result. Because a resumed step re-executes
+its body from the top, `Spawn` is replay-aware: a call matching a child this run already created (same
+workflow and input, positionally) returns that child instead of enqueuing a duplicate. On daemon startup a
+run left `awaiting_child` stays parked until its child completes — or is re-enqueued immediately if the child
+reached a terminal state while the daemon was down. Two authoring consequences: the error `Await` returns
+while suspending is the engine's interrupt signal and must propagate out of the `Do` step unchanged, and any
+code before the `Await` re-runs on resume (so it should be idempotent or flow through `Spawn`).
 
 `Run.ParentID` is persisted, exposed as `parent_id` in the run JSON, and filterable (`GET /api/runs?parent=`,
 `runs list --parent`), so clients can render run families. Canceling a parent cancels its non-terminal

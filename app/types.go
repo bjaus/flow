@@ -16,6 +16,7 @@ const (
 	StatusQueued         = core.StatusQueued
 	StatusRunning        = core.StatusRunning
 	StatusAwaitingReview = core.StatusAwaitingReview
+	StatusAwaitingChild  = core.StatusAwaitingChild
 	StatusParked         = core.StatusParked
 	StatusNeedsMigration = core.StatusNeedsMigration
 	StatusSucceeded      = core.StatusSucceeded
@@ -32,6 +33,7 @@ const (
 	OutcomeRevise  = core.OutcomeRevise
 	OutcomeReject  = core.OutcomeReject
 )
+
 type ConfigStatus = core.ConfigStatus
 type RunFilter = core.RunFilter
 type EventKind = core.EventKind
@@ -50,18 +52,19 @@ type Tracer = core.Tracer
 type Span = core.Span
 
 const (
-	EventRunStarted      = core.EventRunStarted
-	EventRunFinished     = core.EventRunFinished
-	EventStepStarted     = core.EventStepStarted
-	EventStepFinished    = core.EventStepFinished
-	EventAgentToken      = core.EventAgentToken
-	EventGateReached     = core.EventGateReached
-	EventDecisionApplied = core.EventDecisionApplied
-	EventRunParked       = core.EventRunParked
-	EventRunResumed      = core.EventRunResumed
-	EventConfigChanged   = core.EventConfigChanged
-	EventConfigReloaded  = core.EventConfigReloaded
-	EventTriggerSkipped  = core.EventTriggerSkipped
+	EventRunStarted       = core.EventRunStarted
+	EventRunFinished      = core.EventRunFinished
+	EventStepStarted      = core.EventStepStarted
+	EventStepFinished     = core.EventStepFinished
+	EventAgentToken       = core.EventAgentToken
+	EventGateReached      = core.EventGateReached
+	EventDecisionApplied  = core.EventDecisionApplied
+	EventRunParked        = core.EventRunParked
+	EventRunAwaitingChild = core.EventRunAwaitingChild
+	EventRunResumed       = core.EventRunResumed
+	EventConfigChanged    = core.EventConfigChanged
+	EventConfigReloaded   = core.EventConfigReloaded
+	EventTriggerSkipped   = core.EventTriggerSkipped
 )
 
 type Stores struct {

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS runs (
   error TEXT NOT NULL DEFAULT '',
   interrupt_id TEXT NOT NULL DEFAULT '',
   gate_prompt TEXT NOT NULL DEFAULT '',
+  waiting_on TEXT NOT NULL DEFAULT '',
   decision BLOB,
   cancel_pending INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL,

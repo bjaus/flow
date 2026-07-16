@@ -14,6 +14,7 @@ const (
 	StatusQueued         Status = "queued"
 	StatusRunning        Status = "running"
 	StatusAwaitingReview Status = "awaiting_review"
+	StatusAwaitingChild  Status = "awaiting_child"
 	StatusParked         Status = "parked"
 	StatusNeedsMigration Status = "needs_migration"
 	StatusSucceeded      Status = "succeeded"
@@ -37,6 +38,7 @@ type Run struct {
 	Error         string          `json:"error,omitempty"`
 	InterruptID   string          `json:"interrupt_id,omitempty"`
 	GatePrompt    string          `json:"gate_prompt,omitempty"`
+	WaitingOn     string          `json:"waiting_on,omitempty"`
 	Decision      *Decision       `json:"decision,omitempty"`
 	CancelPending bool            `json:"cancel_pending,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
@@ -77,18 +79,19 @@ type RunFilter struct {
 type EventKind string
 
 const (
-	EventRunStarted      EventKind = "run.started"
-	EventRunFinished     EventKind = "run.finished"
-	EventStepStarted     EventKind = "step.started"
-	EventStepFinished    EventKind = "step.finished"
-	EventAgentToken      EventKind = "agent.token"
-	EventGateReached     EventKind = "gate.reached"
-	EventDecisionApplied EventKind = "decision.applied"
-	EventRunParked       EventKind = "run.parked"
-	EventRunResumed      EventKind = "run.resumed"
-	EventConfigChanged   EventKind = "config.changed"
-	EventConfigReloaded  EventKind = "config.reloaded"
-	EventTriggerSkipped  EventKind = "trigger.skipped"
+	EventRunStarted       EventKind = "run.started"
+	EventRunFinished      EventKind = "run.finished"
+	EventStepStarted      EventKind = "step.started"
+	EventStepFinished     EventKind = "step.finished"
+	EventAgentToken       EventKind = "agent.token"
+	EventGateReached      EventKind = "gate.reached"
+	EventDecisionApplied  EventKind = "decision.applied"
+	EventRunParked        EventKind = "run.parked"
+	EventRunAwaitingChild EventKind = "run.awaiting_child"
+	EventRunResumed       EventKind = "run.resumed"
+	EventConfigChanged    EventKind = "config.changed"
+	EventConfigReloaded   EventKind = "config.reloaded"
+	EventTriggerSkipped   EventKind = "trigger.skipped"
 )
 
 type Event struct {
