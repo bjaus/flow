@@ -50,6 +50,8 @@ Task-specific guides live in **`.agents/skills/`** (portable `SKILL.md` format �
 etc.). Load the one relevant to your current task:
 
 - **`flow-dsl`** — the DSL public API, for authoring workflows in tests, examples, and the runtime.
+  When choosing *which composition* expresses a multi-agent shape (pipeline, panel, generator–critic,
+  supervisor, swarm, …), consult **[PARADIGMS.md](./PARADIGMS.md)** alongside it.
 - **`engine-api`** — how the runtime compiles and runs a workflow via `engine`, incl. streaming and durable
   interrupt/resume.
 - **`verify-and-iterate`** — the `just` recipes, `vhs` tapes, the gateway, and determinism-first testing.

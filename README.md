@@ -45,6 +45,8 @@ The default daemon listens on `:7788`, stores runs and checkpoints in `./flow.db
 
 There is one core authoring type: `flow.Step[In, Out]`. **Leaves do work** and **combinators arrange work**;
 every combinator returns another step, so nesting is unlimited and Go checks every edge.
+[`PARADIGMS.md`](./PARADIGMS.md) maps every multi-agent paradigm — pipeline, panel, generator–critic,
+triage, supervisor, swarm, blackboard, HITL — to the composition that expresses it and when to use which.
 
 ### Leaves
 
