@@ -203,3 +203,68 @@ func TestMigrationActions(t *testing.T) {
 		require.Equal(t, expected, run.Status)
 	}
 }
+
+type verdict struct {
+	Text     string `json:"text"`
+	Outcome  string `json:"outcome"`
+	Approved bool   `json:"approved"`
+	Feedback string `json:"feedback"`
+}
+
+// The decision endpoint accepts an explicit three-way outcome; legacy {approved, feedback} bodies still work,
+// and the gate's apply sees the same resolved outcome either way. The CLI submits reject natively.
+func TestDecisionOutcomeRoundTripAndCLIReject(t *testing.T) {
+	a, s := testApp(t, FakeProvider(nil))
+	wf := flow.Define("gate", "three-way review", flow.Then(
+		flow.Do("start", func(_ context.Context, in string) (verdict, error) { return verdict{Text: in}, nil }),
+		flow.Human("review", func(v verdict, d flow.Decision) verdict {
+			v.Outcome, v.Approved, v.Feedback = d.Resolved(), d.Approved, d.Feedback
+			return v
+		}, func(v verdict) string { return "review " + v.Text }),
+	))
+	require.NoError(t, a.Register(wf))
+	runWorker(t, a)
+	ts := httptest.NewServer(a.Handler())
+	defer ts.Close()
+
+	decide := func(body any) string {
+		t.Helper()
+		var triggered map[string]string
+		requestJSON(t, ts.Client(), "POST", ts.URL+"/api/runs", map[string]any{"workflow": "gate", "input": "doc"}, 202, &triggered)
+		id := triggered["id"]
+		waitRun(t, s, id, StatusAwaitingReview)
+		requestJSON(t, ts.Client(), "POST", ts.URL+"/api/runs/"+id+"/decision", body, 202, nil)
+		return id
+	}
+
+	// Explicit outcome: reject with an explanation — inexpressible under the legacy convention.
+	id := decide(map[string]any{"outcome": "reject", "feedback": "out of scope"})
+	run := waitRun(t, s, id, StatusSucceeded)
+	require.JSONEq(t, `{"text":"doc","outcome":"reject","approved":false,"feedback":"out of scope"}`, string(run.Result))
+
+	// Explicit outcome: approve; the legacy Approved field is populated for old readers.
+	id = decide(map[string]any{"outcome": "approve"})
+	run = waitRun(t, s, id, StatusSucceeded)
+	require.JSONEq(t, `{"text":"doc","outcome":"approve","approved":true,"feedback":""}`, string(run.Result))
+
+	// Legacy body without outcome: feedback-without-approval still resolves to revise.
+	id = decide(map[string]any{"approved": false, "feedback": "tighten"})
+	run = waitRun(t, s, id, StatusSucceeded)
+	require.JSONEq(t, `{"text":"doc","outcome":"revise","approved":false,"feedback":"tighten"}`, string(run.Result))
+
+	// Unknown outcome is rejected before the run resumes.
+	var triggered map[string]string
+	requestJSON(t, ts.Client(), "POST", ts.URL+"/api/runs", map[string]any{"workflow": "gate", "input": "doc"}, 202, &triggered)
+	waitRun(t, s, triggered["id"], StatusAwaitingReview)
+	requestJSON(t, ts.Client(), "POST", ts.URL+"/api/runs/"+triggered["id"]+"/decision", map[string]any{"outcome": "maybe"}, 409, nil)
+
+	// CLI: `runs reject <id> --feedback ...` posts an explicit reject.
+	cmd := ClientCLI()
+	cmd.SetArgs([]string{"--endpoint", ts.URL, "runs", "reject", triggered["id"], "--feedback", "declined"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	run = waitRun(t, s, triggered["id"], StatusSucceeded)
+	require.JSONEq(t, `{"text":"doc","outcome":"reject","approved":false,"feedback":"declined"}`, string(run.Result))
+}

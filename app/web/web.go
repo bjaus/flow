@@ -137,7 +137,10 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request, tail string) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		d := core.Decision{Approved: r.FormValue("approved") == "true", Feedback: r.FormValue("feedback")}
+		d := core.Decision{Outcome: r.FormValue("outcome"), Approved: r.FormValue("approved") == "true", Feedback: r.FormValue("feedback")}
+		if d.Outcome != "" {
+			d.Approved = d.Outcome == core.OutcomeApprove
+		}
 		if err := h.service.Decide(r.Context(), parts[0], d); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return

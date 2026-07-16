@@ -260,3 +260,58 @@ func TestConcurrentRunsIsolateFanOutSubCheckpoints(t *testing.T) {
 		t.Fatalf("run B results crossed with run A: %q", got)
 	}
 }
+
+// A Human apply that switches on Resolved() sees three distinct outcomes — approve, revise, reject — whether
+// the operator names the outcome explicitly or a legacy client encodes it through {approved, feedback}.
+func TestDurableHumanThreeWayResolvedOutcomes(t *testing.T) {
+	gate := flow.Human("triage",
+		func(v string, d flow.Decision) string {
+			switch d.Resolved() {
+			case flow.OutcomeApprove:
+				return "GO:" + v
+			case flow.OutcomeRevise:
+				return "REDO(" + d.Feedback + "):" + v
+			case flow.OutcomeReject:
+				return "STOP(" + d.Feedback + "):" + v
+			default:
+				return "?:" + v
+			}
+		},
+		func(v string) string { return "review " + v })
+	wf := flow.Define("threeway", "", gate)
+
+	cases := []struct {
+		name string
+		dec  flow.Decision
+		want string
+	}{
+		{"explicit approve", flow.Decision{Outcome: flow.OutcomeApprove}, "GO:x"},
+		{"explicit revise", flow.Decision{Outcome: flow.OutcomeRevise, Feedback: "tighten"}, "REDO(tighten):x"},
+		{"explicit reject with feedback", flow.Decision{Outcome: flow.OutcomeReject, Feedback: "out of scope"}, "STOP(out of scope):x"},
+		{"legacy approve", flow.Decision{Approved: true}, "GO:x"},
+		{"legacy revise", flow.Decision{Feedback: "tighten"}, "REDO(tighten):x"},
+		{"legacy reject", flow.Decision{}, "STOP():x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, err := engine.Compile(context.Background(), wf, registry(nil), &memStore{m: map[string][]byte{}})
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+			ctx := context.Background()
+			cp := "threeway-" + tc.name
+			_, err = app.Invoke(ctx, "x", compose.WithCheckPointID(cp))
+			if _, paused := compose.ExtractInterruptInfo(err); !paused {
+				t.Fatalf("expected a pause at the gate, got: %v", err)
+			}
+			rctx := compose.ResumeWithData(ctx, interruptID(t, err), tc.dec)
+			out, err := app.Invoke(rctx, "x", compose.WithCheckPointID(cp))
+			if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			if out != tc.want {
+				t.Fatalf("out = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}

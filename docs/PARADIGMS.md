@@ -243,10 +243,23 @@ latency, and human rejection rate.
 
 ```go
 approval := flow.Human("publish", func(w Work, d flow.Decision) Work {
-    w.Approved, w.Feedback = d.Approved, d.Feedback
+    switch d.Resolved() {
+    case flow.OutcomeApprove:
+        w.Approved = true
+    case flow.OutcomeRevise:
+        w.Feedback = d.Feedback
+    case flow.OutcomeReject:
+        w.Rejected, w.Feedback = true, d.Feedback
+    }
     return w
 }, renderApproval)
 ```
+
+A gate is a three-way choice — approve, revise (send back with guidance), or reject — and `Decision.Outcome`
+names it explicitly (`flow.OutcomeApprove`, `flow.OutcomeRevise`, `flow.OutcomeReject`); feedback may accompany
+any outcome, so reject-with-explanation is first-class. Switch on `d.Resolved()`, which honors an explicit
+`Outcome` and otherwise derives the legacy convention (`Approved` → approve, feedback alone → revise, neither →
+reject), so old clients that send only `{approved, feedback}` keep working.
 
 Use it for irreversible actions, policy decisions, ambiguity, or high-impact exceptions—not to compensate for
 an undefined automated contract. Follow it with `Guard` before the side effect. A `Human` can be nested inside

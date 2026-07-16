@@ -64,10 +64,35 @@ func StateDo[In, Out any](name string, fn func(ctx context.Context, in In, get f
 	}}
 }
 
-// Decision is the generic operator answer a human gate yields.
+// Outcome values for a Decision. A gate is a three-way choice: approve (proceed), revise (send back with
+// guidance), or reject (refuse). Feedback is legal with any outcome.
+const (
+	OutcomeApprove = "approve"
+	OutcomeRevise  = "revise"
+	OutcomeReject  = "reject"
+)
+
+// Decision is the generic operator answer a human gate yields. Outcome names the operator's choice
+// explicitly; when it is empty (legacy clients), Resolved derives the choice from Approved and Feedback.
 type Decision struct {
 	Approved bool
 	Feedback string
+	Outcome  string
+}
+
+// Resolved returns the effective outcome: Outcome when set; otherwise the legacy derivation —
+// Approved means approve, feedback without approval means revise, and neither means reject.
+func (d Decision) Resolved() string {
+	switch {
+	case d.Outcome != "":
+		return d.Outcome
+	case d.Approved:
+		return OutcomeApprove
+	case d.Feedback != "":
+		return OutcomeRevise
+	default:
+		return OutcomeReject
+	}
 }
 
 // Human suspends the run for a person; the backend checkpoints and resumes, recovering the in-flight value.

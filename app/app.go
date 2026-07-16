@@ -19,6 +19,7 @@ import (
 
 	"github.com/bjaus/flow"
 	"github.com/bjaus/flow/app/agent"
+	"github.com/bjaus/flow/app/internal/core"
 	flowmcp "github.com/bjaus/flow/app/mcp"
 	"github.com/bjaus/flow/app/server"
 	"github.com/bjaus/flow/app/tools"
@@ -425,6 +426,13 @@ func (a *App) Decide(ctx context.Context, id string, d Decision) error {
 	if r.Status != StatusAwaitingReview {
 		return fmt.Errorf("run %q is %s, not awaiting_review", id, r.Status)
 	}
+	switch d.Outcome {
+	case "":
+	case core.OutcomeApprove, core.OutcomeRevise, core.OutcomeReject:
+		d.Approved = d.Outcome == core.OutcomeApprove // keep the legacy field coherent for old readers
+	default:
+		return fmt.Errorf("invalid outcome %q: want %q, %q, or %q", d.Outcome, core.OutcomeApprove, core.OutcomeRevise, core.OutcomeReject)
+	}
 	r.Decision = &d
 	r.Status = StatusQueued
 	if err := a.runs.Save(ctx, r); err != nil {
@@ -709,7 +717,7 @@ func (a *App) execute(ctx context.Context, run *Run) error {
 	// Let steps spawn and await child runs of other registered workflows (spawn.go).
 	runCtx = a.withSpawner(runCtx, run)
 	if run.Decision != nil && run.InterruptID != "" {
-		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, flow.Decision{Approved: run.Decision.Approved, Feedback: run.Decision.Feedback})
+		runCtx = compose.ResumeWithData(runCtx, run.InterruptID, flow.Decision{Approved: run.Decision.Approved, Feedback: run.Decision.Feedback, Outcome: run.Decision.Outcome})
 		run.Decision = nil
 	}
 	var out any

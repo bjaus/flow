@@ -82,7 +82,7 @@ func commandTree(a *App) *cobra.Command {
 	workflows.AddCommand(workflowsList(&endpoint))
 	root.AddCommand(workflows)
 	runs := &cobra.Command{Use: "runs"}
-	runs.AddCommand(runTrigger(&endpoint), runList(&endpoint), runGet(&endpoint), runWatch(&endpoint), runDecision(&endpoint, true), runDecision(&endpoint, false), runCancel(&endpoint), runMigrate(&endpoint))
+	runs.AddCommand(runTrigger(&endpoint), runList(&endpoint), runGet(&endpoint), runWatch(&endpoint), runDecision(&endpoint, "approve", OutcomeApprove), runDecision(&endpoint, "return", OutcomeRevise), runDecision(&endpoint, "reject", OutcomeReject), runCancel(&endpoint), runMigrate(&endpoint))
 	root.AddCommand(runs)
 	config := &cobra.Command{Use: "config"}
 	config.AddCommand(configStatus(&endpoint), configReload(&endpoint))
@@ -216,14 +216,11 @@ func runWatch(endpoint *string) *cobra.Command {
 		return scan.Err()
 	}}
 }
-func runDecision(endpoint *string, approved bool) *cobra.Command {
+func runDecision(endpoint *string, name, outcome string) *cobra.Command {
 	var feedback string
-	name := "approve"
-	if !approved {
-		name = "return"
-	}
 	c := &cobra.Command{Use: name + " <id>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		return client(endpoint).request(cmd.Context(), "POST", "/api/runs/"+args[0]+"/decision", Decision{Approved: approved, Feedback: feedback}, nil)
+		d := Decision{Outcome: outcome, Approved: outcome == OutcomeApprove, Feedback: feedback}
+		return client(endpoint).request(cmd.Context(), "POST", "/api/runs/"+args[0]+"/decision", d, nil)
 	}}
 	c.Flags().StringVar(&feedback, "feedback", "", "operator feedback")
 	return c

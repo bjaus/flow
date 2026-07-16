@@ -34,9 +34,12 @@ register the state type once with `engine.Register[T]()`.
 
 ### `Human`
 
-`Human` checkpoints its carried value, emits a prompt, and resumes when `flow.Decision{Approved, Feedback}` is
-submitted. `apply` owns the policy for folding that decision into `T`. Put a `Guard` after approval when a
-side effect must be impossible without it.
+`Human` checkpoints its carried value, emits a prompt, and resumes when a `flow.Decision` is submitted. A
+decision is three-way — switch `apply` on `d.Resolved()`, which yields `flow.OutcomeApprove`,
+`flow.OutcomeRevise`, or `flow.OutcomeReject` (from the explicit `Outcome` field, or derived from the legacy
+`{Approved, Feedback}` pair when it is empty); `Feedback` may accompany any outcome. `apply` owns the policy
+for folding that decision into `T`. Put a `Guard` after approval when a side effect must be impossible
+without it.
 
 ## Combinators
 

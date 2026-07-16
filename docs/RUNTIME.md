@@ -115,6 +115,7 @@ flow runs get <id> [--json]
 flow runs watch <id>
 flow runs approve <id> [--feedback TEXT]
 flow runs return <id> [--feedback TEXT]
+flow runs reject <id> [--feedback TEXT]
 flow runs cancel <id>
 flow runs migrate <id> <restart|abandon|finish_on_previous>
 flow config status
@@ -154,7 +155,7 @@ do not run `Serve` more than once concurrently on the same instance.
 | `GET` | `/api/runs/{id}` | fetch a run |
 | `GET` | `/api/runs/{id}/events` | replay then stream one run |
 | `GET` | `/api/events` | replay/stream all events |
-| `POST` | `/api/runs/{id}/decision` | apply approval/feedback |
+| `POST` | `/api/runs/{id}/decision` | apply a decision: `{outcome: approve\|revise\|reject, feedback}`; legacy `{approved, feedback}` accepted |
 | `POST` | `/api/runs/{id}/cancel` | request cancellation |
 | `POST` | `/api/runs/{id}/migration` | resolve incompatible state |
 | `GET` | `/api/config` | registry status |

@@ -25,6 +25,13 @@ const (
 
 type Run = core.Run
 type Decision = core.Decision
+
+// Decision outcome values (three-way gate semantics; see flow.Decision).
+const (
+	OutcomeApprove = core.OutcomeApprove
+	OutcomeRevise  = core.OutcomeRevise
+	OutcomeReject  = core.OutcomeReject
+)
 type ConfigStatus = core.ConfigStatus
 type RunFilter = core.RunFilter
 type EventKind = core.EventKind

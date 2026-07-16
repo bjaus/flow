@@ -143,9 +143,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "a":
-			return m, m.decision(true)
+			return m, m.decision(core.OutcomeApprove)
 		case "r":
-			return m, m.decision(false)
+			return m, m.decision(core.OutcomeRevise)
+		case "x":
+			return m, m.decision(core.OutcomeReject)
 		case "1":
 			return m, m.migration("restart")
 		case "2":
@@ -229,12 +231,12 @@ func (m Model) migration(action string) tea.Cmd {
 		return runsMsg(m.runs)
 	}
 }
-func (m Model) decision(approved bool) tea.Cmd {
+func (m Model) decision(outcome string) tea.Cmd {
 	return func() tea.Msg {
 		if len(m.runs) == 0 || m.selected >= len(m.runs) || m.runs[m.selected].Status != core.StatusAwaitingReview {
 			return nil
 		}
-		body, _ := json.Marshal(core.Decision{Approved: approved})
+		body, _ := json.Marshal(core.Decision{Outcome: outcome, Approved: outcome == core.OutcomeApprove})
 		req, _ := http.NewRequestWithContext(m.client.ctx, http.MethodPost, m.client.Endpoint+"/api/runs/"+m.runs[m.selected].ID+"/decision", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := m.client.HTTP.Do(req)
@@ -294,7 +296,7 @@ func (m Model) View() string {
 	}
 	b.WriteString("\n" + title.Render("Transcript") + "\n" + m.transcript + "\n")
 	if len(m.runs) > 0 && m.selected < len(m.runs) && m.runs[m.selected].Status == core.StatusAwaitingReview {
-		b.WriteString("\n" + title.Render("Review: ") + m.runs[m.selected].GatePrompt + "\n[a] approve  [r] return\n")
+		b.WriteString("\n" + title.Render("Review: ") + m.runs[m.selected].GatePrompt + "\n[a] approve  [r] return  [x] reject\n")
 	}
 	if len(m.runs) > 0 && m.selected < len(m.runs) && m.runs[m.selected].Status == core.StatusNeedsMigration {
 		b.WriteString("\n" + title.Render("Migration required") + "\n[1] restart  [2] abandon  [3] finish on previous\n")

@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/bjaus/flow/internal/ir"
@@ -83,5 +84,46 @@ func TestWalkCountsKinds(t *testing.T) {
 		if counts[kind] != want {
 			t.Errorf("kind %d count = %d, want %d", kind, counts[kind], want)
 		}
+	}
+}
+
+func TestDecisionResolved(t *testing.T) {
+	cases := []struct {
+		name string
+		d    Decision
+		want string
+	}{
+		{"explicit approve", Decision{Outcome: OutcomeApprove}, OutcomeApprove},
+		{"explicit revise", Decision{Outcome: OutcomeRevise}, OutcomeRevise},
+		{"explicit reject", Decision{Outcome: OutcomeReject}, OutcomeReject},
+		{"explicit reject with feedback", Decision{Outcome: OutcomeReject, Feedback: "not this quarter"}, OutcomeReject},
+		{"explicit approve with feedback", Decision{Outcome: OutcomeApprove, Feedback: "nice"}, OutcomeApprove},
+		{"explicit outcome overrides approved flag", Decision{Outcome: OutcomeRevise, Approved: true}, OutcomeRevise},
+		{"legacy approved", Decision{Approved: true}, OutcomeApprove},
+		{"legacy approved with feedback", Decision{Approved: true, Feedback: "ship it"}, OutcomeApprove},
+		{"legacy feedback means revise", Decision{Feedback: "tighten scope"}, OutcomeRevise},
+		{"legacy empty means reject", Decision{}, OutcomeReject},
+	}
+	for _, tc := range cases {
+		if got := tc.d.Resolved(); got != tc.want {
+			t.Errorf("%s: Resolved() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The checkpoint serializer stores registered struct values as encoding/json documents. A checkpoint written
+// before Decision gained Outcome must still decode: the missing field is simply left zero, and Resolved
+// falls back to the legacy derivation.
+func TestDecisionDecodesOldCheckpointPayload(t *testing.T) {
+	old := []byte(`{"Approved":false,"Feedback":"needs work"}`)
+	var d Decision
+	if err := json.Unmarshal(old, &d); err != nil {
+		t.Fatalf("decode old payload: %v", err)
+	}
+	if d.Outcome != "" {
+		t.Fatalf("Outcome = %q, want empty on old payload", d.Outcome)
+	}
+	if got := d.Resolved(); got != OutcomeRevise {
+		t.Fatalf("Resolved() = %q, want %q", got, OutcomeRevise)
 	}
 }

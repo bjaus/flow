@@ -385,7 +385,7 @@ commands and queries; Server-Sent Events for the live stream.
 | `GET /api/runs/{id}` | fetch one run (status, input, result/error, timing) |
 | `GET /api/runs/{id}/events` | **SSE** stream of that run's events (replays history, then live) |
 | `GET /api/events` | **SSE** stream of all runs' events |
-| `POST /api/runs/{id}/decision` | submit a human decision: `{approved, feedback}` |
+| `POST /api/runs/{id}/decision` | submit a human decision: `{outcome, feedback}` with `outcome` ∈ `approve\|revise\|reject`; legacy `{approved, feedback}` still accepted (feedback alone means revise) |
 | `POST /api/runs/{id}/cancel` | request cancellation (cooperative, at the next step boundary) |
 | `POST /api/runs/{id}/migration` | resolve a `needs_migration` run: `{action: restart|abandon|finish_on_previous}` (§12) |
 
@@ -522,7 +522,7 @@ its own. It renders:
 - a **pipeline** view derived from the `step.*` event stream, showing each step as it starts and finishes;
 - an expandable **transcript**: per-agent output, streamed token-by-token from `agent.token` events, so the
   operator watches agents work in real time;
-- a **gate prompt**: when a run reaches `awaiting_review`, the operator approves or returns feedback inline,
+- a **gate prompt**: when a run reaches `awaiting_review`, the operator approves, returns, or rejects inline,
   which posts a decision to the API.
 
 The TUI connects to a running daemon (local by default, any endpoint by flag), so the same client works against
@@ -551,7 +551,7 @@ The `web/` package is a **server-side renderer** living in the daemon:
   embedded via `embed.FS` — never loaded from a CDN, so the app works offline and installs cleanly. The daemon
   serves the app shell at `/` and the assets under `/static`.
 - **Routes under `/ui`.** Action endpoints return HTML fragments: `POST /ui/runs` (trigger), `POST
-  /ui/runs/{id}/decision` (approve/return feedback) invoked from `hx-post` forms; `GET /ui/runs`,
+  /ui/runs/{id}/decision` (approve/return/reject with feedback) invoked from `hx-post` forms; `GET /ui/runs`,
   `/ui/runs/{id}` render the list and detail partials.
 - **Live via SSE.** A single `GET /ui/events` SSE endpoint subscribes to the `EventSink` in-process and emits
   the run's story as **named HTML-fragment events**. The page connects once with

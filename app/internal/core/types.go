@@ -45,9 +45,19 @@ type Run struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
+// Outcome values for a Decision, mirroring the flow DSL's three-way gate semantics.
+const (
+	OutcomeApprove = "approve"
+	OutcomeRevise  = "revise"
+	OutcomeReject  = "reject"
+)
+
+// Decision carries an operator's answer to a human gate. Outcome names the choice explicitly
+// ("approve", "revise", "reject"); legacy clients may omit it and send only {approved, feedback}.
 type Decision struct {
 	Approved bool   `json:"approved"`
 	Feedback string `json:"feedback,omitempty"`
+	Outcome  string `json:"outcome,omitempty"`
 }
 
 type ConfigStatus struct {
