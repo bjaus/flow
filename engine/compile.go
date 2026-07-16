@@ -22,6 +22,20 @@ type Runnable[In, Out any] struct {
 	r compose.Runnable[any, any]
 }
 
+// DynamicRunnable is the type-erased runtime form used by the app module after it has decoded a run's
+// input using the workflow definition's reflected type.
+type DynamicRunnable struct {
+	r compose.Runnable[any, any]
+}
+
+func (r DynamicRunnable) Invoke(ctx context.Context, in any, opts ...compose.Option) (any, error) {
+	return r.r.Invoke(ctx, in, opts...)
+}
+
+func (r DynamicRunnable) Stream(ctx context.Context, in any, opts ...compose.Option) (*schema.StreamReader[any], error) {
+	return r.r.Stream(ctx, in, opts...)
+}
+
 func (a Runnable[In, Out]) Invoke(ctx context.Context, in In, opts ...compose.Option) (Out, error) {
 	out, err := a.r.Invoke(ctx, in, opts...)
 	if err != nil {
@@ -43,27 +57,45 @@ func Compile[In, Out any](ctx context.Context, wf flow.Workflow[In, Out], reg Re
 	// carried type at construction (flow.Human), so intermediate structs crossing a gate are covered too.
 	safeRegister[In]()
 	safeRegister[Out]()
+	r, err := compileDefinition(ctx, wf.Name, wf.Definition(), reg, store)
+	if err != nil {
+		return Runnable[In, Out]{}, err
+	}
+	return Runnable[In, Out]{r: r}, nil
+}
+
+// CompileDefinition compiles the erased definition carried by any flow.Workflow. Most users should call
+// Compile; the app runtime uses this form to register workflows whose generic types differ.
+func CompileDefinition(ctx context.Context, name string, definition *ir.Node, reg Registry, store compose.CheckPointStore) (DynamicRunnable, error) {
+	r, err := compileDefinition(ctx, name, definition, reg, store)
+	if err != nil {
+		return DynamicRunnable{}, err
+	}
+	return DynamicRunnable{r: r}, nil
+}
+
+func compileDefinition(ctx context.Context, name string, definition *ir.Node, reg Registry, store compose.CheckPointStore) (compose.Runnable[any, any], error) {
 	g := compose.NewGraph[any, any]()
 	c := &compiler{g: g, reg: reg}
-	entry, exit, err := c.lower(wf.Definition())
+	entry, exit, err := c.lower(definition)
 	if err != nil {
-		return Runnable[In, Out]{}, fmt.Errorf("lower %q: %w", wf.Name, err)
+		return nil, fmt.Errorf("lower %q: %w", name, err)
 	}
 	if err := g.AddEdge(compose.START, entry); err != nil {
-		return Runnable[In, Out]{}, err
+		return nil, err
 	}
 	if err := g.AddEdge(exit, compose.END); err != nil {
-		return Runnable[In, Out]{}, err
+		return nil, err
 	}
-	opts := []compose.GraphCompileOption{compose.WithGraphName(wf.Name), compose.WithMaxRunSteps(200)}
+	opts := []compose.GraphCompileOption{compose.WithGraphName(name), compose.WithMaxRunSteps(200)}
 	if store != nil {
 		opts = append(opts, compose.WithCheckPointStore(store))
 	}
 	r, err := g.Compile(ctx, opts...)
 	if err != nil {
-		return Runnable[In, Out]{}, err
+		return nil, err
 	}
-	return Runnable[In, Out]{r: r}, nil
+	return r, nil
 }
 
 type compiler struct {
